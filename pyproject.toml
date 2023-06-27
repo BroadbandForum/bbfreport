@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bbfreport"
+dynamic = ["version"]
+authors = [
+  {name = "William Lupton", email = "wlupton@broadband-forum.org"}
+]
+description = "Broadband Forum (BBF) Data Model Report Tool"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "License :: OSI Approved :: BSD License",
+  "Operating System :: OS Independent"
+]
+
+[project.urls]
+"Homepage" = "https://github.com/BroadbandForum/bbfreport"
+"Bug Tracker" = "https://github.com/BroadbandForum/bbfreport/issues"
+
+[tool.setuptools]
+script-files = ["bin/report.py"]
+
+[tool.setuptools.dynamic]
+version = {attr = "bbfreport.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["bbfreport*"]
