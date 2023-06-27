@@ -43,8 +43,25 @@
 # XXX should add more info here, but avoid duplication with setup.py
 # XXX is it OK to invent new dunder names such as __tool_name__?
 __tool_name__ = 'report.py'
-__version__ = '2.0'  # trailing '+' means 'interim version'
-__version_date__ = '2023-06-14'
+__version__ = '2.0.1'  # trailing '+' means 'interim version'
+__version_date__ = '2023-06-27'
+
+
+# use this when reporting the version
+def version(*, as_markdown: bool = False) -> str:
+    # derive the PyPI package name and URL
+    pypi_package = __package__.split('.')[0]
+    pypi_url = 'https://pypi.org/project/%s' % pypi_package
+
+    # if requested, convert to markdown
+    bbf, package = 'Broadband Forum', pypi_package
+    if as_markdown:
+        bbf = '[%s](https://www.broadband-forum.org)' % bbf
+        package = '[%s](%s)' % (pypi_package, pypi_url)
+
+    return '%s %s v%s (%s version)' % (bbf, package,
+                                       __version__, __version_date__)
+
 
 from .content import Content
 from .exception import BBFReportException

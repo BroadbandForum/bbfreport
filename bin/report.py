@@ -84,7 +84,7 @@ assert sys.version_info[:2] >= MIN_VERSION, "You're using python %d.%d; you " \
 # the code
 try:
     from bbfreport import BBFReportException, Format, Null, Parser, Plugin, \
-        Root, Transform, Utility
+        Root, Transform, Utility, version
 except ModuleNotFoundError:
     sys.path.insert(0, os.getcwd())
     from bbfreport import BBFReportException, Format, Null, Parser, Plugin, \
@@ -288,9 +288,11 @@ def get_argparser(argv=None, opts=None):
                             help="report format to generate; choices: {%s}; "
                                  "default: %r" % (
                                      ','.join(format_names), default_format))
-    arg_parser.add_argument('-h', '--help', action='help',
+    arg_parser.add_argument("-v", "--version", action="store_true",
+                            help="show the version number and exit")
+    arg_parser.add_argument("-h", "--help", action="help",
                             default=argparse.SUPPRESS,
-                            help='show this help message and exit')
+                            help="show this help message and exit")
     arg_parser.add_argument("file", type=str, nargs="*",
                             help="DM files to process")
 
@@ -323,6 +325,10 @@ def main(argv=None):
     argv_remaining = opts.get('argv_remaining', None)
     namespace = opts.get('namespace', None)
     args = arg_parser.parse_args(argv_remaining, namespace=namespace)
+
+    # handle --version
+    if args.version:
+        sys.stderr.write('%s\n' % version())
 
     # get the list of transforms
     transforms = opts.get('transforms_before', []) + \

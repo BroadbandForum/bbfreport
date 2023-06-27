@@ -15,6 +15,12 @@ replaces an earlier [report.pl] tool.
 [PyPI]: https://pypi.org/search/?q=bbfreport
 [report.pl]: https://github.com/BroadbandForum/cwmp-xml-tools
 
+## 2023-06-27: v2.0.1
+
+*Tag: [v2.0.1]*
+
+* Added --version option
+
 ## 2023-06-14: v2.0.0
 
 *Tag: [v2.0.0]*
@@ -22,3 +28,4 @@ replaces an earlier [report.pl] tool.
 * Initial version
 
 [v2.0.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.0.0
+[v2.0.1]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.0.1

@@ -22,8 +22,6 @@ from typing import Any, Dict, List, Optional
 # noinspection PyPep8
 import xmlschema
 
-warnings.simplefilter('error')
-
 # XXX lxml _should_ work (and it's desirable, because it includes line number
 #     information) but get loads of spurious validation errors when using
 #     it; I think there must be a difference between the xml.etree and
@@ -130,6 +128,8 @@ def error_message(error: Any, *,
 def report_error(path: str, error: Any, *,
                  namespaces: Optional[Dict[str, str]] = None,
                  terse: bool = False) -> bool:
+    if isinstance(error, warnings.WarningMessage):
+        error = error.message
     sourceline = source_line(error)
     sourceline = ':%d' % sourceline if sourceline is not None else ''
     message = error_message(error, namespaces=namespaces, terse=terse)
@@ -359,14 +359,22 @@ def main(argv=None):
                 path_or_tree = ElementTree.parse(path)
             try:
                 logger.info('validating %s' % path)
-                for error in xmlschema.iter_errors(
-                        path_or_tree, schema, schema_class,
-                        locations=args.location, lazy=args.lazy):
-                    if report_error(file, error, namespaces=namespaces,
-                                    terse=args.terse):
-                        num_errors += 1
-                    else:
-                        ign_errors += 1
+                with warnings.catch_warnings(record=True) as ws:
+                    warnings.simplefilter('always')
+                    for error in xmlschema.iter_errors(
+                            path_or_tree, schema, schema_class,
+                            locations=args.location, lazy=args.lazy):
+                        if report_error(file, error, namespaces=namespaces,
+                                        terse=args.terse):
+                            num_errors += 1
+                        else:
+                            ign_errors += 1
+                    for error in ws:
+                        if report_error(file, error, namespaces=namespaces,
+                                        terse=args.terse):
+                            num_errors += 1
+                        else:
+                            ign_errors += 1
 
             # XXX I'm not sure when this exception gets raised
             except (xmlschema.XMLSchemaException,
