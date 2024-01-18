@@ -1,6 +1,6 @@
-"""The ``bbfreport`` package."""
+"""Hide first model transform plugin."""
 
-# Copyright (c) 2022-2024, Broadband Forum
+# Copyright (c) 2023, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -40,40 +40,30 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-# XXX should add more info here, but avoid duplication with setup.py
-# XXX is it OK to invent new dunder names such as __tool_name__?
-__tool_name__ = 'report.py'
-__version__ = '2.1.0'  # trailing '+' means 'interim version'
-__version_date__ = '2024-01-18'  # can use "TBD" for unknown components
+from bbfreport.node import Model, Root
 
 
-# use this when reporting the version
-def version(*, as_markdown: bool = False) -> str:
-    # derive the PyPI package name and URL
-    pypi_package = __package__.split('.')[0]
-    pypi_url = 'https://pypi.org/project/%s' % pypi_package
+def visit(root: Root, logger) -> None:
+    def nice(mod: Model) -> str:
+        return '{%s}%s' % (mod.key[0], mod)
 
-    # if requested, convert to markdown
-    bbf, package = 'Broadband Forum', pypi_package
-    if as_markdown:
-        bbf = '[%s](https://www.broadband-forum.org)' % bbf
-        package = '[%s](%s)' % (pypi_package, pypi_url)
+    # get the un-hidden models from the command-line documents
+    models = []
+    for xml_file in root.xml_files:
+        dm_document = xml_file.dm_document
+        for model in dm_document.models:
+            if model in models:
+                logger.info('already saw %s' % nice(model))
+            elif model.is_hidden:
+                logger.info('ignored hidden %s' % nice(model))
+            else:
+                models.append(model)
+                logger.info('added %s' % nice(model))
 
-    return '%s %s v%s (%s version)' % (bbf, package,
-                                       __version__, __version_date__)
-
-
-from .content import Content
-from .exception import BBFReportException
-from .format import Format
-from .macro import Macro
-from .macros import DummyMacros
-# XXX it's hard to know which node types to import; perhaps the main "public"
-#     elements, and others as needed (can always get them from bbfreport.node)
-from .node import DataType, DataTypeAccessor, Dm_document, Root, Xml_file
-from .parser import Parser
-from .plugin import Plugin
-from .property import Null
-from .transform import Transform
-# XXX should import more? or just import directly from bbfreport.utility
-from .utility import Utility, Version
+    # if there are multiple models, hide the first one (the expected use
+    # case is that there are two; if necessary this transform can be applied
+    # more than once)
+    if len(models) > 1:
+        model = models[0]
+        model.hide()
+        logger.info('hid %s' % nice(model))

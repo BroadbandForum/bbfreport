@@ -490,6 +490,13 @@ class XMLFormat(Format):
 
                 # add text, if any
                 if text:
+                    # expand the internal and undocumented {{np}} (new
+                    # paragraph) macro
+                    # XXX should really use a standard macro expansion function
+                    #     for this, but providing all its context is too hard
+                    if '{{np}}' in text:
+                        text = text.replace('{{np}}', '\n\n')
+
                     # put it on the same line if possible and permitted
                     # XXX the 'permitted' criteria should be configurable
                     is_single_line = text.find('\n') < 0

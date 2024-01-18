@@ -22,13 +22,16 @@ from typing import Any, Dict, List, Optional
 # noinspection PyPep8
 import xmlschema
 
-# XXX lxml _should_ work (and it's desirable, because it includes line number
-#     information) but get loads of spurious validation errors when using
-#     it; I think there must be a difference between the xml.etree and
-#     lxml.etree interfaces
-# XXX I have a fix... but it's _much_ slower (should run a profiler, but I
-#     suspect that lxml XPath processing is very slow)
-using_lxml = False
+# lxml is preferable (because it includes line number information); used to
+# get loads of spurious validation errors when using it, but this problem
+# appears to have been fixed with (lxml, xmlschema) >= (4.9.3, 2.4.0)
+#
+# old notes (from an earlier version):
+# - I think there must be a difference between the xml.etree and lxml.etree
+#   interfaces
+# - I have a fix, but it's _much_ slower (should run a profiler, but I
+#   suspect that lxml XPath processing is very slow)
+using_lxml = True
 if using_lxml:
     # noinspection PyPep8Naming
     import lxml.etree as ElementTree

@@ -122,22 +122,21 @@ def find_node(node_type: NodeType, *key, prefix: str = '') -> NodeType:
     return cast_node(node_type, node, prefix=prefix)
 
 
-# there are cases where markdown won't have been generated, e.g.
+# there are cases where markdown might not have been generated, or might
+# have been generated for the wrong node, e.g.
 # - parameter descriptions are processed before their syntax elements, so
 #   enumeration value description markdown won't yet have been generated
-# - {{datatype|expand}} 'uses' the data type but this isn't detected by the
-#   'used' transform (which doesn't process macro references)
+# - {{datatype|expand}} will have been expanded in the context of the data type
+#   rather than in the context of the parameter
 # XXX see also lint.visit__has_content(), which has similar logic; this
 #     should be hidden in a utility (where?)
-# XXX have to be careful with args; if it's in kwargs then there will be a
-#     problem, because Macro.expand() adds it
-def get_markdown(content: Content, *, node, **kwargs) -> str:
+def get_markdown(content: Content, *, node, force: bool = False,
+                 **kwargs) -> str:
     markdown = ''
     if content:
         markdown = content.markdown or ''
-        if not markdown:
-            markdown = content.markdown = \
-                Macro.expand(content, node=node, **kwargs)
+        if force or not markdown:
+            markdown = Macro.expand(content, node=node, **kwargs)
     return markdown
 
 
@@ -156,7 +155,11 @@ def maybe_empty(text: str) -> str:
     return '{{empty}}' if text == '' else '*%s*' % text
 
 
-def expand_itemref(ref, scope_or_status, *, node, stack, **_kwargs) -> str:
+def expand_itemref(ref, scope_or_status, *, node, stack, warning,
+                   **_kwargs) -> str:
+    def nameonly(nod) -> str:
+        return nod.object_nameonly if isinstance(nod, Object) else nod.name
+
     macro = stack[-1]
     assert macro.name in {'command', 'event', 'param', 'object'}
 
@@ -171,6 +174,12 @@ def expand_itemref(ref, scope_or_status, *, node, stack, **_kwargs) -> str:
     status = Status(scope_or_status if scope_or_status in Status.names
                     else node.status_inherited.name)
 
+    # warn if the reference has leading and/or trailing whitespace
+    if ref != ref.strip():
+        warning('{{%s}}: argument %r has leading and/or trailing whitespace'
+                % (macro.name, ref))
+        ref = ref.strip()
+
     # if not within a model, don't attempt to follow the reference
     if not node.model_in_path:
         return "*%s*" % (ref or elemname,)
@@ -181,7 +190,10 @@ def expand_itemref(ref, scope_or_status, *, node, stack, **_kwargs) -> str:
         if not item:
             raise MacroException('empty ref only valid in %s descriptions' %
                                  elemname)
-        return "*%s*" % item.name
+        if item is node.parent:
+            return "*%s*" % nameonly(item)
+        else:
+            return "*[%s](#%s)*" % (nameonly(item), item.anchor)
 
     # otherwise follow the reference
     ref_node = follow_reference(node, ref, scope=scope,
@@ -204,8 +216,12 @@ def expand_itemref(ref, scope_or_status, *, node, stack, **_kwargs) -> str:
             ref_node.status_inherited, ref_node.typename,
             ref_node.objpath, extra))
 
-    # cosmetic (report.pl does this too): remove leading dots and hashes
-    return "*[%s](#%s)*" % (re.sub(r'^#*\.*', '', ref), ref_node.anchor)
+    # remove leading hashes and dots from the reference; if this gives an
+    # empty string, e.g., {{object|#}}, use the actual name
+    ref = re.sub(r'^#*\.*', '', ref)
+    if ref == '':
+        ref = nameonly(ref_node)
+    return "*[%s](#%s)*" % (ref, ref_node.anchor)
 
 
 # behavior depends on the arguments:
@@ -285,7 +301,7 @@ def expand_value(value, param, scope_or_status, *, node, stack, args,
                 value_node.status_inherited, value_node.typename,
                 value_node.objpath, value))
 
-        return "*[%s](#%s)*" % (value, values[value].anchor)
+        return "[*%s*](#%s)" % (value, values[value].anchor)
 
 
 # this is called by expand_value()
@@ -333,7 +349,7 @@ def expand_values(values: Dict[str, _ValueFacet], *, owner, stack, chunks,
             key = r'<Empty>'
             if not content:
                 content = Content('{{empty|nocapitalize}}')
-        text += '* [%s]{#%s}' % (key, value.anchor)
+        text += '* [*%s*]{#%s}' % (key, value.anchor)
 
         # process the description
         markdown = get_markdown(content, node=description, stack=stack,
@@ -415,7 +431,7 @@ def expand_command(ref, scope_or_status, *, node, **_kwargs) -> \
 
 
 # XXX what if the data type uses base? need a proper solution
-def expand_datatype(arg, *, node: _HasContent, **_kwargs) -> Content:
+def expand_datatype(arg, *, node: _HasContent, **kwargs) -> Content:
     parameter = cast_node(Parameter, node.parent)
     if not (data_type_ref := parameter.syntax.dataType):
         raise MacroException('parameter is not of a named data type')
@@ -427,9 +443,12 @@ def expand_datatype(arg, *, node: _HasContent, **_kwargs) -> Content:
     data_type.mark_used()
     text = '[[%s](#%s)]' % (name, data_type.anchor)
 
-    description = data_type.description
-    if arg == 'expand' and \
-            (markdown := get_markdown(description.content, node=description)):
+    # XXX there might be other places where .description should be changed to
+    #     .description_inherited; in this case it was needed for a data type
+    #     that inherited its description from a base type
+    description = data_type.description_inherited
+    if arg == 'expand' and (markdown := get_markdown(
+            description.content, node=parameter, force=True, **kwargs)):
         text += ' %s' % markdown
 
     return Content(text)
@@ -831,9 +850,8 @@ def expand_numentries(*, node, **_kwargs) -> Content:
     if not (table := parameter.tableObjectNode):
         raise MacroException('not associated with a table')
 
-    name_or_base = table.object_name or table.object_base
     return Content('The number of entries in the {{object|%s}} table.' %
-                   name_or_base.replace('.{i}.', ''))
+                   table.object_nameonly or table.object_baseonly)
 
 
 def expand_paramdef(*, node, **_kwargs) -> Content:

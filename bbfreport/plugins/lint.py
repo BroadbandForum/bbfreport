@@ -170,6 +170,7 @@ def visit__base(node: _Base, logger):
             all_versions(nod.object_parent, vers)
         return vers
 
+    model = node.model_in_path
     if node.version is not None:
         versions = all_versions(node)
         # XXX this is wrong but I guess it's a stronger check; needs thought
@@ -178,13 +179,23 @@ def visit__base(node: _Base, logger):
             warning('version %s < inherited %s' % (
                 node.version, max(versions)))
 
+        if model and node.version > model.model_version:
+            warning("version %s > model version %s" % (
+                node.version, model.model_version))
+
+        # XXX the earlier node.version < max(versions) check is more general
+        #     than this one, so will demote this to info() pending deletion
+        parent_version = node.object_parent.object_version_inherited
+        if parent_version and node.version < parent_version:
+            info('version %s < parent version %s' % (
+                node.version, parent_version))
+
         # don't warn for objects and profiles, because version is mandatory
         # XXX this is flawed, because we'll want to do this with --thisonly,
         #     but we don't do lint checks with --thisonly!; will need to
         #     create an interim file? (for now, report at info level)
-        if not isinstance(node, (Object, Profile)):
-            parent_version = node.object_parent.object_version_inherited
-            if parent_version is not None and node.version == parent_version:
+        if parent_version and not isinstance(node, (Object, Profile)):
+            if node.version == parent_version:
                 info('version %s is unnecessary' % node.version)
 
             # mark the node so the XML format can omit the unnecessary version
@@ -283,6 +294,12 @@ def visit__has_description(node: _HasDescription, logger):
             warning("was %s at %s and should %s %s at %s" % (
                  from_status, from_ver_first, be, to_status, expected_ver))
             warnings += 1
+
+    # check for newly-added nodes that have already been deprecated
+    if model_version is not None and node.version_inherited >= \
+            model_version and node.status > Status():
+        warning("is new (added in %s) so it shouldn't be %s" % (
+            node.version_inherited, node.status))
 
 
 # XXX this check would be better on Parameter?
@@ -625,9 +642,9 @@ def visit_profile(profile: Profile, logger) -> None:
         def reduced_requirement(old_req: Optional[str],
                                 new_req: Optional[str]) -> bool:
             # note that command and event arguments have 'None' requirements
-            req_map = {None: 1, 'notSpecified': 0, 'readOnly': 1, 'present': 1,
-                       'readWrite': 2, 'create': 2, 'delete': 3,
-                       'createDelete': 4}
+            req_map = {None: 0, 'notSpecified': 1, 'present': 2, 'readOnly': 2,
+                       'writeOnceReadOnly': 3, 'create': 4, 'delete': 5,
+                       'createDelete': 6, 'readWrite': 6}
             assert old_req in req_map and new_req in req_map, \
                 '%s and/or %s not in %s' % (
                     old_req, new_req, list(req_map.keys()))
@@ -635,21 +652,24 @@ def visit_profile(profile: Profile, logger) -> None:
 
         # report missing and/or invalid items
         for base_item in base_items:
+            # ignore non-existent referenced nodes
+            # XXX this is checked elsewhere, yes? should verify this
+            if not (ref_node := base_item.refNode):
+                pass
+
             # if the base profile is implicit, this profile only needs to
             # include items that are not "more deprecated" than the base
             # profile
-            if not profile.base and item_status(base_item) > profile_status:
-                pass
-
-            # ignore non-existent referenced nodes
-            elif not (ref_node := base_item.refNode):
+            elif not profile.base and (
+                    item_status(base_item) > profile_status or
+                    ref_node.status_inherited > profile_status):
                 pass
 
             # check that this profile also references the base node
             elif not (item := ref_map.get(ref_node)):
                 extra = ' (%s)' % base_item.requirement if \
                     base_item.requirement else ''
-                warning('needs to reference %s%s' % (base_item, extra))
+                warning('needs to reference %s%s' % (ref_node.objpath, extra))
 
             # only ObjectRef and ParameterRef have requirements
             elif not isinstance(item, (ObjectRef, ParameterRef)):
@@ -658,7 +678,7 @@ def visit_profile(profile: Profile, logger) -> None:
             # check that the requirement hasn't been reduced
             elif reduced_requirement(base_item.requirement, item.requirement):
                 warning('has reduced requirement (%s) for %s (%s)' % (
-                    item.requirement, base_item, base_item.requirement))
+                    item.requirement, ref_node.objpath, base_item.requirement))
 
 
 def visit__profile_item(item: _ProfileItem, logger) -> None:
@@ -681,10 +701,27 @@ def visit__profile_item(item: _ProfileItem, logger) -> None:
     if not (ref_node := item.refNode):
         warning("%s doesn't exist" % item.typename)
 
-    # check for mismatch between item status and referenced node status
-    # (it's OK for the profile item to be 'more deprecated')
-    elif item_status < ref_node.status_inherited:
-        # XXX python 3.9 doesn't permit this in an ':=' assignment expression
-        #     so have to calculate it again
+    else:
+        # check for mismatch between item access and referenced node access
+        # (it's OK for the profile item to have a 'lower access')
+        # XXX access and requirement should have ordered classes, like Status
+        # XXX access and requirement vary item and ref_node types, so the
+        #     logic must be in the classes
+        # XXX difflint should also check for valid access and requirement
+        #     transitions
+        # XXX this currently assumes ParameterRef / Parameter
+        item_requirement = getattr(item, 'requirement', 'unknown')
+        ref_access = getattr(ref_node, 'access', 'readOnly')
+        access_levels = {'readOnly': 0, 'writeOnceReadOnly': 1, 'readWrite': 2}
+        if access_levels.get(item_requirement, -1) > \
+                access_levels.get(ref_access, -1):
+            warning('requirement %s exceeds %s' % (
+                item_requirement, ref_access))
+
+        # check for mismatch between item status and referenced node status
+        # (it's OK for the profile item to be 'more deprecated')
+        # XXX should move the item_status definition here
         ref_status = ref_node.status_inherited
-        warning('is %s but should be %s' % (item_status, ref_status))
+        if item_status < ref_status:
+            warning('status is %s but should be %s' % (
+                item_status, ref_status))

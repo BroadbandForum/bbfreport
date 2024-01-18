@@ -126,22 +126,25 @@ class Report:
         # indent styles and scripts 14 spaces to be indented 2 spaces past
         # 'header-includes:' in the YAML (see below)
         # XXX need to work out what we need from bbf.css!
-        s_and_s = textwrap.indent(styles_and_scripts, prefix=15 * ' ')
+        s_and_s = styles_and_scripts
+        if self.root.args.show:
+            s_and_s += '\n\n' + link_styles.strip()
+        s_and_s = textwrap.indent(s_and_s, prefix=15 * ' ')
 
         # this is the first thing in the output file, so no initial newline
         # XXX if using the default pandoc HTML template, it's important NOT
         #     to define 'title' (it mucks up the flex layout)
         self.print('''\
             ---
-            comment: |              
+            comment: |
               This is commonmark_x (extended commonmark). Here's an example
               pandoc command:
                 LUA_PATH="install/pandoc/?.lua;;" pandoc-3.0
                     --standalone
                     --from commonmark_x
-                    --data-dir install/pandoc 
+                    --data-dir install/pandoc
                     --resource-path install/pandoc
-                    --lua-filter list-table.lua 
+                    --lua-filter list-table.lua
                     --to html-derived-writer.lua
                     tr-135-1-4-2-cwmp.md
                     --output tr-135-1-4-2-cwmp.html
@@ -216,7 +219,7 @@ class Report:
 
               - []{rowspan=2}
 
-            - - 
+            - -
               - ### DATA MODEL DEFINITION {.unnumbered .unlisted}''' % (
             ' '.join('.%s' % cls for cls in classes),
             ','.join(str(wid) for wid in widths), header_rows, logo_url,
@@ -290,15 +293,15 @@ class Report:
 
             # output the boilerplate
             self.print('''
-                The Parameters defined in this specification make use of a 
+                The Parameters defined in this specification make use of a
                 limited subset of the default SOAP data types [%s]. These data
-                types and the named data types used by this specification 
+                types and the named data types used by this specification
                 are described below.
 
-                Note: A Parameter that is defined to be one of the named data 
-                types is reported as such at the beginning of the Parameter's 
-                description via a reference back to the associated data type 
-                definition (e.g. *[MACAddress]*). However, such parameters 
+                Note: A Parameter that is defined to be one of the named data
+                types is reported as such at the beginning of the Parameter's
+                description via a reference back to the associated data type
+                definition (e.g. *[MACAddress]*). However, such parameters
                 still indicate their SOAP data types.''' % soap)
 
             table = Table('Data Type', 'Base Type', 'Description',
@@ -328,10 +331,10 @@ class Report:
                 if base_type:
                     # XXX this omits the list facet, which is on the data
                     #     type itself; this isn't quite right yet...
-                    facets = data_type.primitive_inherited.format(
-                            facetsonly=True)
+                    facets = Elem.format(data_type.primitive_inherited,
+                                         facetsonly=True)
                     if data_type.list:
-                        facets += data_type.list.format()
+                        facets += Elem.format(data_type.list)
                     base = '[%s](#%s)%s' % (base, base_type.anchor, facets)
                 description = \
                     data_type.description_inherited.content.markdown or ''
@@ -373,7 +376,7 @@ class Report:
             (?P<tr>\w+)         # type, e.g. 'TR'
             -                   # hyphen
             (?P<nnn>\d+)        # number, e.g. '069'
-            (?:i(?P<i>\d+))?    # optional issue number 
+            (?:i(?P<i>\d+))?    # optional issue number
             (?:a(?P<a>\d+))?    # optional amendment number
             (?:c(?P<c>\d+))?    # optional corrigendum number
         ''', re.VERBOSE)
@@ -468,12 +471,12 @@ class Report:
 
         # collect the description
         comps = [textwrap.dedent('''
-            For a given implementation of this data model, the Agent MUST 
-            indicate support for the highest version number of any object 
-            or parameter that it supports. For example, even if the Agent 
+            For a given implementation of this data model, the Agent MUST
+            indicate support for the highest version number of any object
+            or parameter that it supports. For example, even if the Agent
             supports only a single parameter that was introduced in version
             1.4, then it will indicate support for version 1.4. The version
-            number associated with each object and parameter is shown in 
+            number associated with each object and parameter is shown in
             the **Version** column.''')]
         if model.description.content.markdown:
             comps.append(model.description.content.markdown)
@@ -972,11 +975,10 @@ class Elem:
 
     # various constants
     # XXX could use things like '`&lArr;`{=html}' but this can confuse pandoc
-    #     in some context, so use the plain HTML entity versions
+    #     in some contexts, so use the plain HTML entity versions
     LARR = '&lArr;'
     RARR = '&rArr;'
     INFIN = '&infin;'
-    SHY = '&shy;'
 
     # this is populated by Elem.init()
     _ctors = {}
@@ -1004,12 +1006,15 @@ class Elem:
         self.footnotes = footnotes
         assert not kwargs, 'unexpected keyword arguments %s' % kwargs
 
-    # XXX this is perhaps too aggressive?
-    @classmethod
-    def hyphenate(cls, text: str) -> str:
-        # these are positive look-behind and look-ahead patterns
-        # (this is designed to work with names, types and defaults)
-        return re.sub(r'(?<=[,.a-z_-])(?=[A-Z0-9([{])', cls.SHY, text)
+    # this formats the node and then escapes some problematic characters, e.g.
+    # '[' and ']' in '[0:1](:64)', which would otherwise be interpreted as a
+    # link
+    @staticmethod
+    def format(node: Node, *, noescape: bool = False, **kwargs) -> str:
+        text = node.format(**kwargs)
+        if not noescape:
+            text = re.sub(r'([\[\]])', r'\\\1', text)
+        return text
 
     # subclasses can override this
     @property
@@ -1070,9 +1075,9 @@ class Elem:
 
         # commands and events don't have access attributes
         if node.instance_in_path(Input):
-            return 'R'
-        elif node.instance_in_path((Output, Event)):
             return 'W'
+        elif node.instance_in_path((Output, Event)):
+            return 'R'
 
         # noinspection PyUnresolvedReferences
         access = node.access
@@ -1084,7 +1089,7 @@ class Elem:
 
     @property
     def type_string(self) -> str:
-        return self.node.format(typ=True)
+        return Elem.format(self.node, typ=True)
 
     requirement_map = access_map | {
         'notSpecified': r'\-',
@@ -1280,7 +1285,7 @@ class ObjectElem(ModelTableElem):
         # argument objects aren't included in the ToC
         if not node.command_in_path and not node.event_in_path:
             self._toc_entry()
-        name = '[%s]{#%s}' % (self.hyphenate(node.name), node.anchor)
+        name = '[%s]{#%s}' % (node.name, node.anchor)
         return (self.arrow_prefix + name,
                 self.type_string,
                 self.access_string,
@@ -1304,12 +1309,12 @@ class ParameterElem(ModelTableElem):
     @property
     def row(self) -> Tuple[str, ...]:
         node = cast(Parameter, self.node)
-        name = '[%s]{#%s}' % (self.hyphenate(node.name), node.anchor)
+        name = '[%s]{#%s}' % (node.name, node.anchor)
         return (self.arrow_prefix + name,
                 self.type_string,
                 self.access_string,
                 node.description.content.markdown or '',
-                (self.hyphenate(Utility.nice_string(node.syntax.default))
+                (Utility.nice_string(node.syntax.default)
                  if node.syntax.default.type == 'object' else r'\-'),
                 node.version_inherited.name)
 
@@ -1318,8 +1323,9 @@ class ParameterElem(ModelTableElem):
         node = cast(Parameter, self.node)
         text = super().type_string
         if node.syntax.dataType:
-            text = '[%s]{title=%s}' % (node.format(typ=True, prim=True), text)
-        text = self.hyphenate(text)
+            text = '[%s]{title=%s}' % (
+                Elem.format(node, typ=True, prim=True),
+                Elem.format(node, typ=True, noescape=True))
         return text
 
 
@@ -1334,7 +1340,7 @@ class CommandElem(ModelTableElem):
 
         self._toc_entry()
 
-        name = '[%s]{#%s}' % (self.hyphenate(node.name), node.anchor)
+        name = '[%s]{#%s}' % (node.name, node.anchor)
         return (name, 'command', r'\-',
                 node.description.content.markdown or '', r'\-',
                 node.version_inherited.name)
@@ -1375,7 +1381,7 @@ class EventElem(ModelTableElem):
 
         self._toc_entry()
 
-        name = '[%s]{#%s}' % (self.hyphenate(node.name), node.anchor)
+        name = '[%s]{#%s}' % (node.name, node.anchor)
         return (name, 'event', r'\-',
                 node.description.content.markdown or '', r'\-',
                 node.version_inherited.name)
@@ -1402,7 +1408,7 @@ class ObjectRefElem(ProfileTableElem):
     @property
     def row(self) -> Tuple[str, ...]:
         node = cast(ObjectRef, self.node)
-        ref = '[%s](#%s)' % (self.hyphenate(node.ref), node.anchor)
+        ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, self.requirement_string + self.footref
 
 
@@ -1415,7 +1421,7 @@ class ParameterRefElem(ProfileTableElem):
     @property
     def row(self) -> Tuple[str, ...]:
         node = cast(ParameterRef, self.node)
-        ref = '[%s](#%s)' % (self.hyphenate(node.ref), node.anchor)
+        ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, self.requirement_string + self.footref
 
 
@@ -1427,7 +1433,7 @@ class CommandRefElem(ProfileTableElem):
     @property
     def row(self) -> Tuple[str, ...]:
         node = cast(CommandRef, self.node)
-        ref = '[%s](#%s)' % (self.hyphenate(node.ref), node.anchor)
+        ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, r'\-' + self.footref
 
 
@@ -1461,7 +1467,7 @@ class EventRefElem(ProfileTableElem):
     @property
     def row(self) -> Tuple[str, ...]:
         node = cast(EventRef, self.node)
-        ref = '[%s](#%s)' % (self.hyphenate(node.ref), node.anchor)
+        ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, r'\-' + self.footref
 
 
@@ -1590,7 +1596,7 @@ window.addEventListener('DOMContentLoaded', function() {
             var a1_groups = a1.match(regex).groups;
             var b1_groups = b1.match(regex).groups;
             var a1_tuple =  [
-                a1_groups.name.toLowerCase() + (a1_groups.prefix || '~'), 
+                a1_groups.name.toLowerCase() + (a1_groups.prefix || '~'),
                 parseInt(a1_groups.version || 0)];
             var b1_tuple =  [
                 b1_groups.name.toLowerCase() + (b1_groups.prefix || '~'),
@@ -1782,7 +1788,7 @@ tbody_expand_styles = r'''
 <!-- Table body expansion and contraction styles -->
 <style>
 .chevron {
-    color: blue;
+    color: var(--link-color);
     cursor: pointer;
 }
 
@@ -1821,7 +1827,12 @@ tbody_expand_styles = r'''
 global_styles = r'''
 <!-- Global styles (that affect the entire document) -->
 <style>
-:root {
+/* light mode support */
+@media (prefers-color-scheme: light) {
+  :root {
+    --background-color: white;
+    --foreground-color: black;
+    --link-color: blue;
     --parameter-color: white;
     --object-color: #ffff99;
     --command-color: #66cdaa;
@@ -1837,10 +1848,33 @@ global_styles = r'''
     --stripe-color-deprecated: #eeeeee;
     --stripe-color-obsoleted: #dddddd;
     --stripe-color-deleted: #cccccc;
+  }
+}
+
+/* dark mode support */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background-color: black;
+    --foreground-color: white;
+    --link-color: lightblue;
+    --parameter-color: black;
+    --object-color: #bbbb44;
+    --command-color: #56bd9a;
+    --event-color: #56bd9a;
+    --argument-container-color: #777777;
+    --argument-object-color: #dfa0ab;
+    --argument-parameter-color: #bfa4a1;
+    --mountable-object-color: #b3e0ff;
+    --mountpoint-object-color: #3da8ef;
+    --stripe-color-deprecated: #555555;
+    --stripe-color-obsoleted: #444444;
+    --stripe-color-deleted: #333333;
+  }
 }
 
 body, table {
-    background-color: white;
+    background-color: var(--background-color);
+    color: var(--foreground-color);
     font-family: helvetica, arial, sans-serif;
     font-size: 9pt;
 }
@@ -1857,8 +1891,8 @@ h3 {
     font-size: 10pt;
 }
 
-a:link, a:visited, a:hover, a:active {
-    color: inherit;
+a:link, a:visited {
+    color: var(--link-color);
 }
 
 sup {
@@ -2243,6 +2277,37 @@ local_styles = r'''
     hyphenate-character: "";
 }
 
+/* word wrap/break column 1 (Name) */
+.data-model-table td:first-child {
+    word-wrap: break-word;
+    word-break: break-all;
+    min-width: 27ch;
+}
+
+/* word wrap/break column 2 (Base Type) */
+.data-model-table td:nth-child(2) {
+    word-wrap: break-word;
+    word-break: break-all;
+    min-width: 12ch;
+}
+
+/* word wrap/break column 3 (Write) */
+.data-model-table td:nth-child(3) {
+    min-width: 1ch;
+}
+
+/* word wrap/break column 5 (Object Default) */
+.data-model-table td:nth-child(5) {
+    word-wrap: break-word;
+    word-break: break-all;
+    min-width: 12ch;
+}
+
+/* word wrap/break column 6 (Version) */
+.data-model-table td:nth-child(6) {
+    min-width: 6ch;
+}
+
 /* center column 1 (Abbreviation) */
 .profile-notation-table th:nth-child(1),
 .profile-notation-table td:nth-child(1) {
@@ -2257,7 +2322,18 @@ local_styles = r'''
 </style>
 '''
 
-# all styles and scripts
+# conditional styles
+link_styles = r'''
+<style>
+/* enabled if the --show option was specified (to avoid confusion between
+   links and inserted text) */
+a:link, a:visited, a:hover, a:active {
+    color: inherit;
+}
+</style>
+'''
+
+# all styles and scripts (but not conditional ones)
 styles_and_scripts = ''.join([
     toc_sidebar_styles,
     toc_expand_script, toc_expand_styles,

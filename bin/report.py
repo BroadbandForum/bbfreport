@@ -88,7 +88,7 @@ try:
 except ModuleNotFoundError:
     sys.path.insert(0, os.getcwd())
     from bbfreport import BBFReportException, Format, Null, Parser, Plugin, \
-        Root, Transform, Utility
+        Root, Transform, Utility, version
 
 nice_list = Utility.nice_list
 
@@ -150,7 +150,8 @@ def get_argparser(argv=None, opts=None):
     arg_parser.add_argument("-o", "--output", "--outfile",
                             type=argparse.FileType('w'),
                             default=default_output,
-                            help="name of output file; default: %s" %
+                            help="name of output file (--outfile is "
+                                 "deprecated); default: %s" %
                                  default_output.name)
     arg_parser.add_argument("-l", "--loglevel", choices=loglevels,
                             default=default_loglevel,
@@ -206,8 +207,6 @@ def get_argparser(argv=None, opts=None):
     if args.debugpath:
         if loglevel_map[args.loglevel] > logging.INFO:
             args.loglevel = 'info'
-        # XXX could also add 'property' but it's very verbose
-        args.loggername += ['node']
 
     logging.basicConfig(level=loglevel_map[args.loglevel])
 
@@ -325,6 +324,13 @@ def main(argv=None):
     argv_remaining = opts.get('argv_remaining', None)
     namespace = opts.get('namespace', None)
     args = arg_parser.parse_args(argv_remaining, namespace=namespace)
+
+    # warn about deprecated arguments (use the minimum valid abbreviations)
+    deprecated = [arg for dep in {'--outf'}
+                  for arg in argv if arg[:len(dep)] == dep]
+    if deprecated:
+        logger.warning('these options are deprecated: %s' % ', '.join(
+                deprecated))
 
     # handle --version
     if args.version:

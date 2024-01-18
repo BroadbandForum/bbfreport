@@ -795,6 +795,9 @@ class _Node(_Mergeable):
             path = self.fullpath(style='object+file')
         return path
 
+    # this is used with re.search(args.debugpath, node.debugpath)
+    debugpath = nicepath
+
     @property
     def objpath(self) -> str:
         """The node's object path. Same as `fullpath()` with
@@ -1244,6 +1247,7 @@ class _Base(_Node):
             self._parent.version_inherited if self._parent is not None \
             else None
 
+    # XXX this should return Null rather than None (general point)
     @property
     @cache
     def object_parent(self) -> Optional['_Base']:
@@ -1533,6 +1537,7 @@ class Root(_Base):
     # XXX will need to provide basic XSD support; where? how?
     @classmethod
     def parse(cls, file: str, *, spec: Optional[Spec] = None,
+              ignore_spec: bool = False,
               parent: Optional[Union['Root', 'Import']] = None,
               stack: Optional[Stack] = None) -> Optional['Xml_file']:
         """Find, parse and merge an XML file. All files are parsed via this
@@ -1546,6 +1551,9 @@ class Root(_Base):
             file: The file to parse.
             spec: The expected value of the `Dm_document.spec` attribute. If
                 specified, only files with matching specs will be considered.
+            ignore_spec: If ``True``, the spec is ignored (this allows other
+                problems to be detected, e.g., when a local file spec has
+                been changed but the referencing file spec hasn't been changed)
             parent: The parent node. This will always be either a `Root` or
                 an `Import` node, and must be specified.
             stack: Node stack. Contains an entry for every node that's
@@ -1563,11 +1571,12 @@ class Root(_Base):
         args = cls.args
 
         # find the file
-        realpath = File.find(file, spec=spec, dirs=args.dirs,
-                             nocurdir=args.nocurdir, recursive=args.recursive)
+        realpath = File.find(file, spec=spec, ignore_spec=ignore_spec,
+                             dirs=args.dirs, nocurdir=args.nocurdir,
+                             recursive=args.recursive)
         # if can't find it, try again with an all lower-case filename
         # XXX this is a hack to work around the misnamed TR-140-1-0-2.xml
-        if realpath is None:
+        if realpath is None and file.lower() != file:
             realpath = File.find(file.lower(), spec=spec, dirs=args.dirs,
                                  nocurdir=args.nocurdir,
                                  recursive=args.recursive)
@@ -1577,9 +1586,11 @@ class Root(_Base):
                 places += [os.curdir]
             if args.dirs:
                 places += args.dirs
-            extra = f' in {Utility.nicer_list(places, last="or")}' if places \
+            extra1 = f' with spec {spec}' if spec else ''
+            extra2 = f' in {Utility.nicer_list(places, last="or")}' if places \
                 else ''
-            logger.error(f"{parent.nicepath}: can't find file {file!r}{extra}")
+            logger.error(f"{parent.nicepath}: can't find file {file!r}"
+                         f"{extra1}{extra2}")
             return None
 
         # see whether we've already parsed it
@@ -1890,12 +1901,17 @@ class Import(_Base):
         if len(self.xml_files) > 0:
             return
 
-        # parse the imported file
-        # XXX should we return on error? we won't call the super() method
+        # parse the imported file (ignore the spec when there are fewer than
+        # two files on the command line, so we can detect when a local file
+        # spec has been changed but the referencing file spec hasn't been
+        # changed)
+        ignore_spec = len(self.args.file) < 2
         xml_file = Root.parse(str(self.file), spec=self.spec,
-                              parent=self, stack=stack)
+                              ignore_spec=ignore_spec, parent=self,
+                              stack=stack)
         if xml_file is None or len(self.xml_files) != 1:
             # assume that the problem has already been reported
+            # XXX should we return on error? we won't call the super() method
             return
 
         # get its dm_document; if it's Null it means that this XML file is
@@ -2113,7 +2129,7 @@ class _DataTypeBase(_HasDescription, _HasValueMixin):
     # XXX experimental mechanism for giving nodes a chance to review (and
     #     modify?) proposed updates; should be generalized
     def proposed_update(self, other: '_DataTypeBase') -> Any:
-        logger.info('%s: proposed update %s -> %s' % (
+        logger.debug('%s: proposed update %s -> %s' % (
             self.nicepath, self, other))
 
 
@@ -2258,7 +2274,8 @@ class _HasSizes(_FacetMixin):
             errors.append('sizes: %s' % '; '.join(sizes_errors))
         return valid
 
-    def format(self, *, human: bool = False, **kwargs) -> str:
+    def format(self, *, human: bool = False, is_list: bool = False,
+               **kwargs) -> str:
         text = super().format(**kwargs)
         sizes = cast(list[Size], self.sizes_inherited)
         if sizes:
@@ -2268,8 +2285,9 @@ class _HasSizes(_FacetMixin):
             # special case where there's only one size, with only a maximum
             elif len(sizes) == 1 and 'minLength' not in sizes[0].attrs and \
                     'maxLength' in sizes[0].attrs:
-                text += ' (maximum number of characters per item %s)' % \
-                        sizes[0].maxLength
+                extra = '' if is_list else ' per item'
+                text += ' (maximum number of characters%s %s)' % (
+                    extra, sizes[0].maxLength)
             else:
                 text += ' (length '
                 text += Utility.nicer_list(size_strs, last=', or')
@@ -2958,14 +2976,14 @@ class Template(_HasContent):
     def _mergeprep(self, *, stack: Optional[Stack] = None,
                    report: Optional[Report] = None) -> None:
         if report:
-            logger.info('%s: mergeprep %r' % (report, self))
+            logger.debug('%s: mergeprep %r' % (report, self))
 
         self.comments = None
         self.cdatas = None
         self.others = None
 
         if report:
-            logger.info('%s: mergeprep %r done' % (report, self))
+            logger.debug('%s: mergeprep %r done' % (report, self))
 
     def _mergedone(self, *, stack=None, report=None):
         """Check that the `id` attribute was specified, and mark this item
@@ -3377,9 +3395,10 @@ class ComponentRef(_Base):
             elif relpath == '':
                 outdata += [(field, value)]
 
-            # parameters, commands or events are defined within their
-            # containing object (might be a command/event argument object)
-            elif field in {'parameter', 'command', 'event'}:
+            # components, parameters, commands and events are defined within
+            # their containing object (might be a command/event argument
+            # object)
+            elif field in {'component', 'parameter', 'command', 'event'}:
                 if not isprofile:
                     prelude = (('base', relpath),)
                 else:
@@ -3691,7 +3710,7 @@ class Object(_ModelItem):
                 self.numEntriesParameter = None
 
         # XXX temporarily report created and modified objects
-        logger.info('%s %s' % (
+        logger.debug('%s %s' % (
             'DEF' if self.name and not self.base else 'ref', self))
 
         # XXX this should never happen
@@ -3765,6 +3784,9 @@ class Object(_ModelItem):
         # XXX ideally the objects would be inserted in a more logical place
         return tuple(self.elems + tuple(self.object_objects))
 
+    # XXX should all these be defined on _Base? this would save isinstance()
+    #     checks but would rather pollute the namespace; maybe defined on
+    #     _ModelItem as a compromise?
     @property
     @cache
     def object_name(self) -> Optional[str]:
@@ -3785,12 +3807,12 @@ class Object(_ModelItem):
 
     @property
     def object_nameonly(self) -> Optional[str]:
-        return re.sub(r'({[a-z]}\.)?\.$', '', self.object_name) if \
+        return re.sub(r'(\.{i})?\.$', '', self.object_name) if \
             self.object_name else None
 
     @property
     def object_baseonly(self) -> Optional[str]:
-        return re.sub(r'({[a-z]}\.)?\.$', '', self.object_base) if \
+        return re.sub(r'(\.{i})?\.$', '', self.object_base) if \
             self.object_base else None
 
     @staticmethod
@@ -4149,7 +4171,7 @@ class Syntax(DataType):
             if lst:
                 # XXX perhaps the caller should add the prefix and suffix
                 text += 'Comma-separated list'
-                text += lst.format(human=human, **kwargs)
+                text += lst.format(human=human, is_list=True, **kwargs)
                 text += ' of '
             text += typ.format(prim=prim, human=human,
                                plural=bool(lst), **kwargs)
@@ -4520,6 +4542,11 @@ class DataTypeRef(DataType):
         if not human:
             if prim and (primitive := self.primitive_inherited):
                 text = primitive.format(**kwargs)
+                # XXX should provide a .list_inherited property? in the general
+                #     case there could be multiple levels of nested list
+                if self.baseNode.list:
+                    lst = cast(List, self.baseNode.list)
+                    text += lst.format(human=human, **kwargs)
         else:
             # plural only affects the human-readable version
             if plural:
@@ -4683,8 +4710,10 @@ class List(_HasDescription, _HasSizes):
                                doc='Nested Brackets support.')
 
     def format(self, *, human: bool = False, **kwargs) -> str:
-        # this gets item information
-        text = super().format(human=human, **kwargs)
+        text = ''
+
+        # this gets overall list min/max entries and overall length information
+        length = super().format(human=human, **kwargs)
 
         # XXX is this the best way to check whether an attribute has been
         #     explicitly supplied?
@@ -4709,6 +4738,9 @@ class List(_HasDescription, _HasSizes):
                 elif max_def:
                     text += 'up to %s' % max_val
                 text += ' items)'
+
+        # the overall entries and length information always goes at the end
+        text += length
 
         return text
 

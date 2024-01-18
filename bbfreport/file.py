@@ -70,7 +70,8 @@ class File:
     @classmethod
     def find(cls, path: str, *, dirs: Optional[List[str]] = None,
              nocurdir: bool = False, recursive: bool = False,
-             spec: Optional[Spec] = None) -> Optional[str]:
+             spec: Optional[Spec] = None, ignore_spec: bool = False) -> \
+                Optional[str]:
         """Find a file.
 
         Any ``~user`` or ``$variable`` strings in the file path and directory
@@ -87,6 +88,9 @@ class File:
                 current directory is never searched recursively).
             spec: The expected `Dm_document.spec`. If specified, only files
                 with matching specs will be considered.
+            ignore_spec: If ``True``, the spec is ignored (this allows other
+                problems to be detected, e.g., when a local file spec has
+                been changed but the referencing file spec hasn't been changed)
 
         Returns:
             The full path of the located file, or ``None`` if not found.
@@ -119,7 +123,8 @@ class File:
 
         # find the file; this returns None or the real path
         realpath = cls.__findfile(file, dirs=dirs_, recursive=recursive,
-                                  drive=drive, spec=spec)
+                                  drive=drive, spec=spec,
+                                  ignore_spec=ignore_spec)
 
         # if found, cache and return the real path
         if realpath:
@@ -130,7 +135,8 @@ class File:
     @classmethod
     def __findfile(cls, file: str, *, dirs: Optional[List[str]] = None,
                    recursive: bool = False, drive: Optional[str] = None,
-                   spec: Optional[Spec] = None) -> Optional[str]:
+                   spec: Optional[Spec] = None, ignore_spec: bool = False) \
+            -> Optional[str]:
         logger.info(f'find {file!r} spec {spec!r}')
 
         # parse name into its component parts
@@ -172,9 +178,18 @@ class File:
                 logger.debug(f'    trying {path!r}')
                 matches = glob.glob(path, recursive=recursive)
                 if matches:
-                    # if the first pattern (actual file) matches, always
-                    # return it
-                    if i == 0:
+                    # if the first pattern (actual file) matches:
+                    # - if no spec was supplied (or ignoring the spec), always
+                    #   return it (will typically ignore the spec when only a
+                    #   single file was specified on the command line; in this
+                    #   case want to open local files can detect when a
+                    #   local file spec has been changed but the referencing
+                    #   file spec hasn't been changed)
+                    # - otherwise, always check the spec (will typically be the
+                    #   case when multiple files were specified on the command
+                    #   line; in this case, e.g., calculating diffs, ignoring
+                    #   the spec would be very dangerous)
+                    if i == 0 and (spec is None or ignore_spec):
                         logger.info(f'-> actual {matches[0]!r}')
                         return os.path.realpath(matches[0])
 

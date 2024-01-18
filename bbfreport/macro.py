@@ -99,13 +99,14 @@ class Macro:
         self._macros[macro_name] = self
 
     @classmethod
-    def expand(cls, content: Content, *, node=None, **kwargs) -> str:
+    def expand(cls, content: Content, *,
+               node=None, args=None, **kwargs) -> str:
+        if args is None and node is not None:
+            args = node.args
         content_plus = cls._content_plus(content, node=node)
 
-        # XXX adding args here is error-prone, because it'll give an error
-        #     if it was passed in kwargs; should check...
-        text = cls._expand_arg(content_plus.body, node=node,
-                               args=node.args, **kwargs)
+        text = cls._expand_arg(
+                content_plus.body, node=node, args=args, **kwargs)
 
         # ensure that there are no leading newlines
         # XXX there shouldn't be any; but should remove trailing whitespace?
@@ -304,7 +305,10 @@ class Macro:
             else:
                 macro_ref = cast(MacroRef, item)
                 macro_name = macro_ref.name
-                macro = Macro._macros.get(macro_name, None)
+                if macro_name.strip() != macro_name:
+                    warning('{{%s}}: macro name has leading and/or trailing '
+                            'whitespace' % macro_name)
+                macro = Macro._macros.get(macro_name.strip(), None)
                 if macro is None:
                     warning('{{%s}}: non-existent macro' % macro_name)
                     chunk = '{{%s|non-existent}}' % macro_name
@@ -356,15 +360,19 @@ class Macro:
             cast(list, open_list).extend(ref.args[exp_args:])
 
         # otherwise issue a warning
-        # XXX have included the good args to help diagnosing cases like
+        # XXX have included the good args to help in diagnosing cases like
         #     'this {bibref|XYZ}} has a missing opening curly brace'
-        # XXX should use arg.text (or a more readable version), but it
-        #     currently only works for simple args
+        # XXX the messages can still be quite difficult to interpret,
+        #     because it's hard to represent macro args as strings in the
+        #     general case
         elif act_args > exp_args:
-            good_args = ' '.join(str(arg) for arg in ref.args[:exp_args])
-            bad_args = ' '.join(str(arg) for arg in ref.args[exp_args:])
-            raise MacroException('unexpected arguments <%s> (after <%s>)' %
-                                 (bad_args, good_args))
+            good_args = ref.args[:exp_args]
+            bad_args = ref.args[exp_args:]
+            bad_plural = 's' if len(bad_args) > 1 else ''
+            good_text = ', '.join(str(arg) for arg in good_args)
+            bad_text = ', '.join(str(arg) for arg in bad_args)
+            raise MacroException('unexpected argument%s %s after: %s' %
+                                 (bad_plural, bad_text, good_text))
         return args
 
     @staticmethod

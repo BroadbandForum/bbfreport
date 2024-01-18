@@ -43,15 +43,17 @@
 import cProfile
 import difflib
 import pstats
+import re
 import sys
+import time
 
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, cast, Dict, List, Optional, Set, Union
 
 from ..macro import Macro
-from ..node import Content, Description, _HasContent, _ModelItem, Node, \
-    _ProfileItem, Root, _ValueFacet
+from ..node import (Description, _HasContent, Model, _ModelItem, Node,
+                    _ProfileItem, Root, _ValueFacet)
 from ..path import relative_path
 
 Diffs = Dict[Union[_ModelItem, _ValueFacet], List['Diff']]
@@ -111,18 +113,34 @@ class Diff:
     def __str__(self):
         name = self.name if self.name else self.elem.typename if self.elem \
             else self.entity.name
-        text = '%s %s ' % (self.operation.name, name)
+        text = '%s %s' % (self.operation.name, name)
         if self.is_whitespace:
-            text += '(W) '
+            text += ' (W)'
         if self.entity == Entity.attr:
-            if self.operation == Operation.added:
-                text += '%s' % self.value
-            elif self.operation == Operation.changed:
-                text += '%s -> %s' % (self.value, self.value2)
+            text += ' %s' % self.value
+            if self.operation == Operation.changed:
+                text += ' -> %s' % self.value2
         elif self.entity == Entity.elem:
-            text += '%s' % self.elem
+            if str(self.elem) != name:
+                text += ' %s' % self.elem
         elif self.entity == Entity.content:
-            text += '%r -> %r' % (self.value, self.value2)
+            # XXX heuristic conversion of a list of macro references and
+            #     strings to a single string (it should be in macro.py)
+            def as_string(c) -> str:
+                s = ''.join(str(x) for x in c)
+                r = re.sub(r'^{{div\|{{classes}}\|(.*)}}$', r'\1', s)
+                r = r.replace('}}{{div|{{classes}}|', '\n\n')
+                r = r.replace('{{nl}}', '\n')
+                return r
+
+            i1, i2, c1 = self.value
+            j1, j2, c2 = self.value2
+            if i2 > i1:
+                text += ' %r' % as_string(c1)
+            if i2 > i1 and j2 > j1:
+                text += ' ->'
+            if j2 > j1:
+                text += ' %r' % as_string(c2)
         return text
 
 
@@ -135,11 +153,11 @@ def _post_init_(args, logger) -> Optional[bool]:
         return True
 
     # XXX should this be unconditional?
-    logger.info('auto-enabled --show')
+    logger.debug('auto-enabled --show')
     args.show = True
 
 
-def visit(root: Root, logger) -> Optional[bool]:
+def visit(root: Root, args, logger) -> Optional[bool]:
     # get the models from the command-line documents
     models = []
     for xml_file in root.xml_files:
@@ -159,9 +177,15 @@ def visit(root: Root, logger) -> Optional[bool]:
 
     # we need to traverse the two models, comparing them
     # XXX this isn't yet comparing referenced items such as data types
-    logger.info('comparing %s and %s' % (models[0].key, models[1].key))
+    def key_str(mod: Model) -> str:
+        return '{%s}%s' % mod.key
+
+    logger.info('comparing %s and %s' % (
+        key_str(models[0]), key_str(models[1])))
+    start = time.time()
     diffs = node_diffs(models[0], models[1], logger=logger)
-    logger.info('compared the two models')
+    logger.info('compared %s and %s in %d ms' % (
+        key_str(models[0]), key_str(models[1]), (time.time() - start) * 1000))
 
     # disable profiling?
     if time_it:
@@ -203,7 +227,7 @@ def visit(root: Root, logger) -> Optional[bool]:
     counts = {}
     for model_item, model_item_diffs in diffs.items():
         str_model_item = str(model_item)
-        args = []
+        macro_args = []
         body = []
         new_node = None
         new_body = None
@@ -218,12 +242,22 @@ def visit(root: Root, logger) -> Optional[bool]:
                 model_item_diff.old_node, model_item_diff.new_node
             str_new_node = str(new_node)
 
+            # if the node matches --debugpath, log at the info level
+            logger_func = logger.info if args.debugpath and re.search(
+                    args.debugpath, new_node.debugpath) else logger.debug
+
+            # ignore whitespace-only changes
+            # XXX should be able to control this
+            if not model_item_diff.is_whitespace:
+                logger_func('%s %s %s' % (new_node.nicepath, new_node.typename,
+                                          model_item_diff))
+
             # unhide the changed node and its ancestors (and their
             # description elements)
             if any_attr_diff or any_elem_diff or any_cont_diff:
                 new_node.object_unhide(description=True, upwards=True)
-                logger.debug('%s %s (and up) unhidden' % (
-                    new_node.nicepath, new_node.typename))
+                # logger.debug('%s %s (and up) unhidden' % (
+                #     new_node.nicepath, new_node.typename))
 
             # provide some additional context if the model item node isn't the
             # new node (the node that changed); it will always be an ancestor
@@ -237,34 +271,29 @@ def visit(root: Root, logger) -> Optional[bool]:
                 context += '%s ' % new_node.typename
 
             if model_item_diff.entity == Entity.attr:
-                name, value, value2 = \
-                    model_item_diff.name, model_item_diff.value, \
-                    model_item_diff.value2
-                if model_item_diff.operation == Operation.added:
-                    args.append('Added %sattribute %s = %s' % (
-                        context, emph_str(name), emph_str(value)))
-                elif model_item_diff.operation == Operation.removed:
-                    args.append('Removed %sattribute %s = %s' % (
-                        context, emph_str(name), emph_str(value)))
-                elif model_item_diff.operation == Operation.changed:
-                    args.append('Changed %sattribute %s from %s to %s' % (
-                        context, emph_str(name), emph_str(value),
-                        emph_str(value2)))
+                operation, name, value, value2 = (
+                    model_item_diff.operation, model_item_diff.name,
+                    model_item_diff.value, model_item_diff.value2)
+                macro_arg = '%s %sattribute %s = %s%s' % (
+                    operation.name.capitalize(), context, emph_str(name),
+                    emph_str(value), ' &rArr; %s' % emph_str(value2) if
+                    value2 is not None else '')
+                macro_args.append(macro_arg)
 
             elif model_item_diff.entity == Entity.elem:
                 elem, typename = \
                     model_item_diff.elem, model_item_diff.elem.typename
                 if model_item_diff.operation == Operation.added:
-                    args.append('Added %s%s %s' % (
+                    macro_args.append('Added %s%s %s' % (
                         context, elem_ref(elem), typename))
                     # unhide the new elem, its children and ancestors
                     elem.object_unhide(upwards=False)
                     elem.object_unhide(upwards=True)
-                    logger.debug('%s %s (and down and up) unhidden' % (
-                        elem.nicepath, elem.typename))
+                    # logger.debug('%s %s (and down and up) unhidden' % (
+                    #     elem.nicepath, elem.typename))
                 elif model_item_diff.operation == Operation.removed:
                     # we won't try to reference it; it's no longer there!
-                    args.append('Removed %s%s%s' % (
+                    macro_args.append('Removed %s%s%s' % (
                         context, emph_nod(elem), typename))
 
             elif model_item_diff.entity == Entity.content:
@@ -274,8 +303,8 @@ def visit(root: Root, logger) -> Optional[bool]:
                 new_body = new_node.content.body_as_list
 
                 tag = model_item_diff.name
-                i1, i2 = model_item_diff.value
-                j1, j2 = model_item_diff.value2
+                i1, i2, _ = model_item_diff.value
+                j1, j2, _ = model_item_diff.value2
 
                 # XXX explain this and use better variable names
                 if j1 > j:
@@ -313,7 +342,7 @@ def visit(root: Root, logger) -> Optional[bool]:
                                model_item_diff.operation), 0)
             counts[(model_item_diff.entity, model_item_diff.operation)] += 1
 
-        if args:
+        if macro_args:
             if not model_item.description:
                 # XXX it's necessary to create the content like this, or else
                 #     to call merge(); you can't just do something like
@@ -321,7 +350,7 @@ def visit(root: Root, logger) -> Optional[bool]:
                 #     up with two Content objects; such things should be
                 #     detected
                 model_item.description = Description(data=(('content', ()),))
-            footer = '{{diffs|%s}}' % '|'.join(args)
+            footer = '{{diffs|%s}}' % '|'.join(macro_args)
             model_item.description.content.footer = footer
             logger.debug('%s %s footer %r (%r)' % (
                 model_item.nicepath, model_item.typename, footer,
@@ -336,14 +365,17 @@ def visit(root: Root, logger) -> Optional[bool]:
                 # XXX what's more, it's wrong, because it includes the wrapping
                 #     divs, which makes 'content_plus' wrong (adding content
                 #     should be inline/block aware; cf pandoc!)
+                # XXX could/should use args.debugpath-aware logger_func() but
+                #     will defer this until the above problems have been fixed
                 content = ''.join(str(s) for s in body)
                 footer = model_item.description.content.footer
                 model_item.description.content = content
                 model_item.description.content.footer = footer
                 logger.debug('%s %s content %r)' % (
-                    model_item.nicepath, model_item.typename, content))
+                    model_item.nicepath, model_item.typename,
+                    content.replace('\\', '')))
 
-    logger.info('appended {{diffs}} macro refs: %s' % ', '.join(
+    logger.debug('appended {{diffs}} macro refs: %s' % ', '.join(
             '%s %s = %s' % (ent.name, op.name, val) for (ent, op), val in
             sorted(counts.items(), key=lambda i: [x.name for x in i[0]])))
 
@@ -513,15 +545,24 @@ def node_diffs(old_node: Node, new_node: Node, *,
                         chunk2):
                     is_whitespace = True
 
-                # [call(nl)] -> [close(div), open(div), call(classes),
-                # argsep(|)] is a whitespace-only change, and is due to
-                # paragraph wrapping
+                # this is a whitespace-only change, and is due to paragraph
+                # wrapping
+                # XXX this doesn't sound quite right; {{np}} should trigger
+                #     a new {{div}}, but why {{np}}?
                 # XXX for now, take the easy way out and compare them as
                 #     strings (will redo this later)
                 # XXX should generalize this to check for any 'close then
                 #     open' within a chunk, because this is harder to handle
                 if str(chunk1) == '[call(nl)]' and str(chunk2) == \
                         '[close(div), open(div), call(classes), argsep(|)]':
+                    is_whitespace = True
+
+                # this is another whitespace-only change, and is due to using
+                # status="append" to append to a description
+                # XXX see the XXX comments to the above case
+                if str(chunk1) == \
+                        '[close(div), open(div), call(classes), argsep(|)]' \
+                        and str(chunk2) == '[call(np)]':
                     is_whitespace = True
 
                 # debug: output header if not already done
@@ -542,6 +583,6 @@ def node_diffs(old_node: Node, new_node: Node, *,
                 #     this loop (it would make the logic clearer)
                 Diff.append(diffs, old_node, new_node, Entity.content,
                             Operation.changed, name=tag,
-                            value=(i1, i2), value2=(j1, j2),
+                            value=(i1, i2, chunk1), value2=(j1, j2, chunk2),
                             is_whitespace=is_whitespace)
     return diffs

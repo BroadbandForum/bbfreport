@@ -220,9 +220,9 @@ class MacroArg:
     def text(self) -> Optional[str]:
         return self._items[0] if self.is_simple and self._items else None
 
-    # XXX maybe this just return self.text or ''?
+    # XXX but until the above has been done, fall back on
     def __str__(self):
-        return str(self._items)
+        return self.text or str(self._items)
 
     __repr__ = __str__
 
@@ -298,6 +298,11 @@ class Content:
         text = ''.join(chars)
         if text != orig:
             logger.debug('escape: %r -> %r' % (orig, text))
+
+        # XXX Content + str etc. use '{{np}}' as a separator, but this mucks
+        #     up the {{div}} logic below, so (temporarily) replace it
+        if '{{np}}' in text:
+            text = text.replace('{{np}}', '\n\n')
 
         # process line by line
         block_active = False

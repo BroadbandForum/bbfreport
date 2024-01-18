@@ -91,7 +91,7 @@ whitespace = Utility.whitespace
 # about the Node interface (such cases are usually noted)
 
 # make type checking happy
-# XXX but it doesn't; I guess Sphinx doesn't set TYPE_CHECKING? maybe it can't;
+# XXX it doesn't; I guess Sphinx doesn't set TYPE_CHECKING? maybe it can't;
 #     is there a downside to allowing this definition?
 # XXX to make this work cleanly, we'd need to refactor parts of node.py;
 #     should create types.py that defines basic types
@@ -101,7 +101,7 @@ if True or TYPE_CHECKING:
         getprop = None
         key = None
         keylast = None
-        fullpath = None
+        debugpath = None
         props = None
         typename = None
 
@@ -190,7 +190,7 @@ class Report:
     logged.
 
     ``bool()`` indicates whether reporting is enabled for this node. If
-    enabled, ``str()`` returns the node's `nicepath`.
+    enabled, ``str()`` returns the node's `debugpath`.
     """
 
     def __init__(self, node: Node):
@@ -200,7 +200,7 @@ class Report:
         ``None``.
 
         Args:
-            node: The node on which potentially to report. ``node.nicepath``
+            node: The node on which potentially to report. ``node.debugpath``
                 must exist and be a string, and ``node.args.debugpath`` must
                 exist and (if not ``None``) be a valid regular expression.
         """
@@ -211,6 +211,9 @@ class Report:
             self._debugpath = self._get_debugpath()
             self._enabled = bool(
                     self._debugpath is not None and
+                    # XXX this is an optimization; need to check for 'node'
+                    #  too?
+                    Utility.logger_names & {logger_name, 'node'} and
                     re.search(node.args.debugpath, self._debugpath))
 
     # XXX it's a bit naughty to expose this
@@ -223,7 +226,7 @@ class Report:
         return self._debugpath
 
     def _get_debugpath(self) -> Optional[str]:
-        return self._node.fullpath(style='object+item+component+value')
+        return self._node.debugpath
 
     def __bool__(self) -> bool:
         return self._enabled
@@ -908,6 +911,7 @@ class BoolAttr(Attr):
     def _merge(self, value: Union[int, bool, str], *,
                report: Optional[Report] = None) -> bool:
         """Check the supplied value is valid. Then set ``_value``."""
+        # noinspection PyTypeChecker
         valid = self.__false_values + self.__true_values
         assert value in valid, '%s: invalid %r value %r' % (
             report, self.name, value)
@@ -1724,20 +1728,25 @@ class Elems(Holder):
                         typename_map[typename] + ['_previous_lexical'] if
                         getattr(node, attr, None) is not None]
             previous = previous[0] if previous else None
+            # '' means "add as first child of parent" (for objects,
+            # this requires additional logic)
+            if previous == '' and typename == 'object' and \
+                    (parent_objpath := node.object_parent.objpath) != '':
+                if report:
+                    logger.info("%s: previous %s -> %s" % (
+                        report, Utility.nice_string(previous),
+                        Utility.nice_string(parent_objpath)))
+                previous = parent_objpath
+            # XXX might also support 'A._.' for "add after last child", but
+            #     this would really require too much knowledge for here
             insert_next = False
             node_parent_name = None
             for existing in self._node_to_prop:
-                # this seems weird... but it can happen
-                # XXX does it indicate a problem somewhere else?
+                # has the node already been added?
                 if node in node_to_prop:
                     pass
-                # XXX should this really be a requirement, e.g. a command
-                #     might use dmr:previousParameter; also, do we need
-                #     dmr:previousCommand and dmr:previousEvent?
-                # elif existing.typename != typename:
-                #     pass
-                # XXX but it's worse; should check that it's a _ModelItem but
-                #     instead do a bit of duck-typing
+                # XXX should check that it's a _ModelItem, but instead do a
+                #     bit of duck-typing
                 elif not hasattr(existing, 'nameOrBase'):
                     pass
                 # XXX this could in theory be None (for invalid XML)
@@ -1748,13 +1757,13 @@ class Elems(Holder):
                         logger.info('%s: added after %s' % (report, previous))
                     node_to_prop[node] = True
                     insert_next = False
+                # it'll only be '' if node is the root object (edge case)
                 elif previous == '':
                     if report:
-                        logger.info('%s: inserted at start' % report)
-                    # XXX this is wrong; '' doesn't mean 'at the start', it
-                    #     means 'as first child'; but is the fix correct?
-                    # node_to_prop[node] = True
-                    insert_next = True
+                        logger.info('%s: added at start' % report)
+                    node_to_prop[node] = True
+                    # insert_next = True
+                # non-matching previous values will be silently ignored
                 elif previous and existing_name == previous:
                     insert_next = True
                 elif typename == 'object' and existing.typename == 'object':
