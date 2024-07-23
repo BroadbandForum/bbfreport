@@ -1,6 +1,6 @@
 """Content utilities."""
 
-# Copyright (c) 2022, Broadband Forum
+# Copyright (c) 2022-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -40,21 +40,22 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import re
 
 from functools import cache
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Optional, Union
 
-from .utility import Utility
+from .logging import Logging
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 # Note that description templates such as {{param}} are always referred to as
 # macros, to avoid any confusion with <template> XML elements
+
+# the opening of the standard {{div}} macro that is used for each paragraph
+# XXX these would be better as functions supporting optional additional classes
+OPEN_DIV = '{{div|{{classes}}|'
+CLOSE_DIV = '}}'
 
 
 # macro reference components (these are only used internally)
@@ -140,7 +141,7 @@ class MacroRef:
     _macro_ref_counts = {}
 
     def __init__(self,
-                 chunks: List[Union[str, '_MacroRefArgSep', 'MacroRef']]):
+                 chunks: list[Union[str, '_MacroRefArgSep', 'MacroRef']]):
         # - chunks will be empty for empty macro references: {{}}
         # - first chunk will be arg-separator in this case: {{|arg}}
         if len(chunks) == 0 or not isinstance(chunks[0], str):
@@ -177,7 +178,7 @@ class MacroRef:
         return self._name
 
     @property
-    def args(self) -> Tuple['MacroArg', ...]:
+    def args(self) -> tuple['MacroArg', ...]:
         return self._args
 
     def __str__(self):
@@ -211,7 +212,7 @@ class MacroArg:
             len(self._items) == 1 and isinstance(self._items[0], str))
 
     @property
-    def items(self) -> List[Union[str, MacroRef]]:
+    def items(self) -> list[Union[str, MacroRef]]:
         return self._items
 
     # XXX should extend this to work for complex args too; it should
@@ -259,19 +260,29 @@ class Content:
     _list_re = re.compile(r'''
         ^
         (?P<typ>[*#:]+)
-        (?P<cnt>:*)
         (?P<sep>\s*)
         (?P<rst>.*)
         $
         ''', flags=re.VERBOSE)
 
-    # the supplied text may contain mediawiki markup as defined in TR-106
+    _indent_re = re.compile(r'^(\s+)')
+
+    # this URL regex is essentially copied from report.pl
+    _url_last = r'\w\d\:\~\/\?\&\=\-\%\#'
+    _url_not_last = _url_last + r'\.'
+    _url_re = re.compile(r'[a-z]+://[' + _url_not_last + r']*[' +
+                         _url_last + r']')
+    del _url_last, _url_not_last
+
+    # the supplied text may contain mediawiki markup as defined in TR-106a13
+    # and earlier, e.g.
     # (https://data-model-template.broadband-forum.org/index.htm#sec:markup);
     # this is quite similar (but not identical) to markdown, so convert to
     # something more markdown-like
     # XXX it also wraps paragraphs in {{div}} macro references
     @classmethod
-    def _preprocess_text(cls, text: Optional[str]) -> Optional[str]:
+    def _preprocess_text(cls, text: Optional[str], *, warning, info, debug,
+                         **_kwargs) -> Optional[str]:
         # the supplied text can be None
         if text is None:
             return None
@@ -297,7 +308,7 @@ class Content:
             chars.append(char)
         text = ''.join(chars)
         if text != orig:
-            logger.debug('escape: %r -> %r' % (orig, text))
+            debug('escape: %r -> %r' % (orig, text))
 
         # XXX Content + str etc. use '{{np}}' as a separator, but this mucks
         #     up the {{div}} logic below, so (temporarily) replace it
@@ -319,9 +330,9 @@ class Content:
 
             # look for lists
             if match := cls._list_re.match(line):
-                dct = match.groupdict()
-                typ, cnt, sep, rst = \
-                    dct['typ'], dct['cnt'], dct['sep'], dct['rst']
+                # XXX mediawiki allows things like '#:' to continue a level 1
+                #     item, but this will be treated the same as '##'
+                typ, sep, rst = match['typ'], match['sep'], match['rst']
                 if len(typ) == 0:
                     pass
                 # ignore '*' and '#' lines with no separators; the '*'
@@ -330,41 +341,40 @@ class Content:
                 elif typ[0] in {'*', '#'} and sep == '':
                     pass
                 else:
-                    # leading ':' is an indented list, but there's no markdown
-                    # equivalent so (temporarily) convert to a bulleted list
-                    if typ.startswith(':'):
-                        typ = '*' * len(typ)
-                        msg += ' indented -> bulleted'
-
-                    # replace '**' with '  *' etc. ('#' needs to be '#.')
-                    # XXX '#.' doesn't work with commonmark_x, so just use '1.'
-                    typ0 = '1.' if typ[0] == '#' else typ[0]
-                    typ = '%s%s' % ('  ' * (len(typ) - 1), typ0)
+                    # even though '*' and '#' are similar (':' is different),
+                    # it's clearer to handle each one separately
+                    typ0 = typ[0]
+                    np = ''
+                    if typ0 == '*':
+                        # replace '** ' with '  * ' etc.
+                        typ = '%s%s' % ('  ' * (len(typ) - 1), typ0)
+                    elif typ0 == '#':
+                        # replace '# ', '## ' with '1. ', '   1. ' etc.
+                        # XXX use '1. '; '#. ' doesn't work with commonmark_x
+                        typ0 = '1.'
+                        typ = '%s%s' % ('   ' * (len(typ) - 1), typ0)
+                    else:
+                        assert typ0 == ':'
+                        np = '{{np}}'
+                        typ = '>' * len(typ)
+                        msg += ' indented -> block quote'
                     if len(typ) > 1:
                         msg += ' nested list'
 
-                    # XXX not yet handling cnt (continue)
-                    # XXX content can be parsed more than once, e.g. by both
-                    #     'used' and 'lint', in which case warnings can be
-                    #     output more than once; should avoid this
-                    if cnt:
-                        logger.warning('unhandled list continuation: %r' %
-                                       line)
-
                     # update the line
                     # XXX could put more info into the {{li}} macro, e.g. depth
-                    line = '{{li|%s}}%s' % (typ, rst)
+                    line = '%s{{li|%s}}%s' % (np, typ, rst)
 
             # warn of insufficiently (or erroneously) indented text
             # (don't try to fix it; there are too many cases to consider)
-            if match := re.match(r'^(\s+)', line):
+            if match := cls._indent_re.match(line):
                 # there shouldn't be any tabs, but if there are, expand them
                 # (the tab size defaults to 8)
                 indent = match.group(1).expandtabs()
-                if not block_active and len(indent) < 4:
-                    logger.info('increase indent %d to 4 for preformatted '
-                                'text (or remove indent): %r' % (
-                                    len(indent), line))
+                if len(indent) < 4:
+                    func = info if block_active else warning
+                    func('increase indent %d to 4 (or remove it): %r' % (
+                        len(indent), line))
 
             # replace ''' with ** (strong) and '' with * (emphasis)
             if "'''" in line:
@@ -374,9 +384,12 @@ class Content:
                 line = line.replace("''", "*")
                 msg += ' emphasis'
 
+            # identify URLs and enclose them in <> characters
+            line = cls._url_re.sub(r'<\g<0>>', line)
+
             # report changed lines
             if line != orig:
-                logger.debug('%s: %r -> %r' % (msg, orig, line))
+                debug('%s: %r -> %r' % (msg, orig, line))
 
             # paragraph processing; Utility.whitespace() will have removed
             # any trailing spaces, so empty lines will always be ''
@@ -393,14 +406,14 @@ class Content:
             if close_div:
                 text += '}}'
             if open_div:
-                text += '{{div|{{classes}}|'
+                text += OPEN_DIV
             if line:
                 text += line + '{{nl}}'
         # XXX this isn't 100% safe, but it's OK if {{nl}} is never documented
         text = text.replace('{{nl}}}}', '}}')
         return text
 
-    def _parse(self) -> None:
+    def _parse(self, *, error, warning, info, debug, **_kwargs) -> None:
         if self._parsed:
             return
 
@@ -442,8 +455,14 @@ class Content:
         # suggest a markdown-like language that isn't actual markdown)
         # (pre-processing is typically suppressed when macro expansions
         # return content)
-        self._mrkdwn = self._preprocess_text(self._text) if self._preprocess \
-            else self._text
+        # XXX the check for OPEN_DIV is rather a hack; it's to prevent multiple
+        #     levels of wrapping in divs, which causes problems with diffs
+        preprocess = self._preprocess and not (
+                self._text and self._text.startswith(OPEN_DIV))
+        self._mrkdwn = self._preprocess_text(self._text, error=error,
+                                             warning=warning, info=info,
+                                             debug=debug) if \
+            preprocess else self._text
 
         # the stack starts off with an empty item...
         stack = []
@@ -457,6 +476,7 @@ class Content:
         argsep(True)
 
         for token in self._token_regex.split(self._mrkdwn or ''):
+            # noinspection GrazieInspection
             if token == '{{':
                 push()
             elif token == '|':
@@ -492,10 +512,23 @@ class Content:
     def preprocess(self) -> bool:
         return self._preprocess
 
+    # this supports passing logging functions
+    def get_body(self, *, error=None, warning=None, info=None, debug=None) \
+            -> MacroArg:
+        if error is None:
+            error = logger.error
+        if warning is None:
+            warning = logger.warning
+        if info is None:
+            info = logger.info
+        if debug is None:
+            debug = logger.debug
+        self._parse(error=error, warning=warning, info=info, debug=debug)
+        return self._body
+
     @property
     def body(self) -> MacroArg:
-        self._parse()
-        return self._body
+        return self.get_body()
 
     # split on whitespace
     # XXX it's tempting to add some punctuation characters such as '.', but
@@ -504,15 +537,25 @@ class Content:
     _split_pattern = re.compile(r'(\s+)')
 
     # this is intended for use when comparing content
-    @property
+    # this supports collapsing whitespace etc. and passing logging functions
     @cache
-    def body_as_list(self) -> List[Any]:
+    def get_body_as_list(self, *, collapse: bool = False, error=None,
+                         warning=None, info=None, debug=None) -> list[Any]:
+        if error is None:
+            error = logger.error
+        if warning is None:
+            warning = logger.warning
+        if info is None:
+            info = logger.info
+        if debug is None:
+            debug = logger.debug
+
         def walk(body: MacroArg, *, items: Optional[Any] = None,
-                 level: Optional[int] = 0) -> List[Any]:
+                 level: Optional[int] = 0) -> list[Any]:
             if items is None:
                 items = []
 
-            for item in body.items:
+            for i, item in enumerate(body.items):
                 if not isinstance(item, MacroRef):
                     assert isinstance(item, str)
                     # split on whitespace, capturing the whitespace but
@@ -521,25 +564,74 @@ class Content:
                     start = 1 if words and not words[0] else None
                     end = -1 if words and not words[-1] else None
                     items.extend(words[start:end])
+                elif collapse and item.name == 'nl':
+                    if i > 0:
+                        # {{nl}} is a soft newline
+                        items.append(' ')
+                elif collapse and item.name == 'np':
+                    if i > 0:
+                        # {{np}} is a paragraph separator
+                        items.append('\n\n')
                 elif not item.args:
                     items.append(_MacroRefCall(item.name))
                 else:
                     items.append(_MacroRefOpen(item.name, level=level))
-                    for i, arg in enumerate(item.args):
-                        if i > 0:
+                    for j, arg in enumerate(item.args):
+                        if j > 0:
                             items.append(_MacroRefArgSep())
                         walk(arg, items=items, level=level+1)
                     items.append(_MacroRefClose(item.name, level=level))
 
+            # if collapsing, combine adjacent space items
+            if collapse:
+                new_items = []
+                space = ''
+                for item in items:
+                    if isinstance(item, str) and re.match(r' +', item):
+                        space = ' '
+                        continue
+
+                    # special case: always put '\n\n' before list items
+                    # (this matches what the xml format currently does)
+                    if str(item) == 'open(li)':
+                        space = '\n\n'
+
+                    if space:
+                        new_items.append(space)
+                        space = ''
+
+                    new_items.append(item)
+
+                items = new_items
+
             return items
 
-        self._parse()
+        self._parse(error=error, warning=warning, info=info, debug=debug)
         return walk(self._body)
 
+    # this is intended for use when comparing content
     @property
-    def macro_refs(self) -> Dict[Union[str, Tuple[str, int]], MacroRef]:
-        self._parse()
+    def body_as_list(self) -> list[Any]:
+        return self.get_body_as_list()
+
+    # this supports passing logging functions
+    def get_macro_refs(self, *, error=None, warning=None, info=None,
+                       debug=None) -> \
+            dict[Union[str, tuple[str, int]], MacroRef]:
+        if error is None:
+            error = logger.error
+        if warning is None:
+            warning = logger.warning
+        if info is None:
+            info = logger.info
+        if debug is None:
+            debug = logger.debug
+        self._parse(error=error, warning=warning, info=info, debug=debug)
         return self._macro_refs
+
+    @property
+    def macro_refs(self) -> dict[Union[str, tuple[str, int]], MacroRef]:
+        return self.get_macro_refs()
 
     @property
     def footer(self) -> str:
@@ -581,18 +673,23 @@ class Content:
         elif isinstance(other, Content):
             # XXX is this the correct way to handle the footer?
             return Content(self.text + other.text,
-                           footer = self.footer + other.footer,
+                           footer=self.footer + other.footer,
                            preprocess=True)
         else:
             raise NotImplementedError
 
     # this is to support str + Content
+    # XXX if content starts with OPEN_DIV, then str is inserted after it (this
+    #     is rather tricky)
     def __radd__(self, other: Union[None, str]) -> 'Content':
         if not other:  # None, '', or any other False objects
             return self
         elif isinstance(other, str):
-            return Content(other + self.text, footer=self._footer,
-                           preprocess=True)
+            if not self.text.startswith(OPEN_DIV):
+                text = other + self.text
+            else:
+                text = OPEN_DIV + other + self.text[len(OPEN_DIV):]
+            return Content(text, footer=self._footer, preprocess=True)
         else:
             raise NotImplementedError
 

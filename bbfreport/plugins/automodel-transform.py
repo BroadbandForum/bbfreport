@@ -3,7 +3,7 @@
 from ..node import Root
 
 
-def visit(root: Root, logger):
+def visit(root: Root):
     # check whether there are any top-level models
     models = [model for xml_file in root.xml_files
               for model in xml_file.dm_document.models]
@@ -12,8 +12,8 @@ def visit(root: Root, logger):
 
     # if there are no models, check whether there are any component imports
     # and definitions (ignoring internal and Diffs components)
-    ignore = lambda comp: comp.name.startswith('_') or \
-                          comp.name.endswith('Diffs')
+    ignore = lambda comp: comp.name.startswith('_') or comp.name.endswith(
+            'Diffs')
     components = [component for xml_file in root.xml_files for imp in
                   xml_file.dm_document.imports for component in imp.components
                   if not ignore(component)] + [component for xml_file in

@@ -41,20 +41,16 @@
 # license grant are also deemed granted under this license.
 
 import json
-import logging
 import re
 
 from typing import Any
 
-from ..node import Description, PathRef, Root
-from ..path import follow_reference, relative_path
-from ..transform import Transform
-from ..utility import Utility
+from ...logging import Logging
+from ...node import Description, PathRef, Root
+from ...path import follow_reference, relative_path
+from ...transform import Transform
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 # noinspection PyShadowingNames
@@ -65,7 +61,7 @@ class RelrefTransform(Transform):
     """
 
     @classmethod
-    def _add_arguments(cls, arg_parser):
+    def _add_arguments(cls, arg_parser, **kwargs):
         default_mappings_file = 'relref-mappings.json'
         arg_group = arg_parser.add_argument_group("relref transform "
                                                   "arguments")
@@ -89,7 +85,7 @@ class RelrefTransform(Transform):
     # mappings
     mappings = {}
 
-    def _visit_begin(self, root: Root, **kwargs) -> None:
+    def _visit_begin(self, root: Root, **_kwargs) -> None:
         self._init_mappings(root)
 
     # this handles pathRefs
@@ -162,7 +158,7 @@ class RelrefTransform(Transform):
             # XXX this needs to be updated; use .content?
             node.text = ref_pattern.sub(sub, node.text)
 
-    def _visit_end(self, root: Root, **kwargs) -> None:
+    def _visit_end(self, root: Root, **_kwargs) -> None:
         self._save_mappings(root)
 
     def _init_mappings(self, node):

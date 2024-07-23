@@ -40,19 +40,15 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import re
 
-from typing import Any, cast, Optional, Tuple
+from typing import Any, cast, Optional
 
-from ..node import _Base, ComponentRef, Model, Object
-from ..transform import Transform
-from ..utility import Utility
+from ...logging import Logging
+from ...node import _Base, ComponentRef, Model, Object
+from ...transform import Transform
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 # XXX should generalize this to check/fix versions regardless of dmr:version
@@ -65,7 +61,7 @@ class VersionTransform(Transform):
     _default_initial_version: str = '1.0'
 
     @classmethod
-    def _add_arguments(cls, arg_parser):
+    def _add_arguments(cls, arg_parser, **kwargs):
         arg_group = arg_parser.add_argument_group("version transform "
                                                   "arguments")
         arg_group.add_argument("--version-initial",
@@ -73,8 +69,8 @@ class VersionTransform(Transform):
                                     "default: model version")
         return arg_group
 
-    def __init__(self, name: Optional[str] = None):
-        super().__init__(name)
+    def __init__(self, name: Optional[str] = None, **kwargs):
+        super().__init__(name, **kwargs)
         self._initial_version = self._default_initial_version
 
     # XXX we need a better way of telling whether it's a top-level object
@@ -182,10 +178,10 @@ class VersionTransform(Transform):
     # this supports up to three-level versions (any additional levels are
     # ignored)
     @staticmethod
-    def _version_components(version: str) -> Tuple[int, int, int]:
+    def _version_components(version: str) -> tuple[int, int, int]:
         components = [int(i) for i in version.split('.')]
         if len(components) < 3:
             components += (3 - len(components)) * [0]
         components = tuple(components[:3])
-        components = cast(Tuple[int, int, int], components)
+        components = cast(tuple[int, int, int], components)
         return components

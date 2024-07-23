@@ -40,20 +40,17 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import re
 import textwrap
 
 from typing import Optional
 
 from ..format import Format
+from ..logging import Logging
 from ..node import _Base, Dm_document, Root
 from ..utility import Namespace, Utility
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 # XXX should pull the wrap support into a utility
 
@@ -192,7 +189,8 @@ def wrap_attrs(props, *, ignore_attrs=None, override_attrs=None,
         elif isinstance(prop.value, dict):
             newline(force=True)
             addtext(name=prop.name)
-            values = [item for pair in prop.value.items() for item in pair]
+            value = override_attrs.get(prop.name, prop.value)
+            values = [item for pair in value.items() for item in pair]
             for index, value in enumerate(values):
                 newline()
                 extra = extra_indent * (1 + index % 2)
@@ -201,6 +199,7 @@ def wrap_attrs(props, *, ignore_attrs=None, override_attrs=None,
         else:  # list
             newline(force=True)
             addtext(name=prop.name)
+            value = override_attrs.get(prop.name, prop.value)
             for value in prop.value:
                 newline()
                 addtext(ext=extra_indent, val=value)
@@ -271,7 +270,7 @@ class XMLFormat(Format):
                           'object', 'command', 'event', 'parameter', 'profile')
 
     @classmethod
-    def _add_arguments(cls, arg_parser):
+    def _add_arguments(cls, arg_parser, **kwargs):
         arg_group = arg_parser.add_argument_group('xml report format '
                                                   'arguments')
         arg_group.add_argument('--xml-always-auto-newline',
@@ -296,8 +295,8 @@ class XMLFormat(Format):
                                help="don't wrap text, e.g. descriptions")
         return arg_group
 
-    def __init__(self, name: Optional[str] = None, **_kwargs):
-        super().__init__(name)
+    def __init__(self, name: Optional[str] = None, **kwargs):
+        super().__init__(name, **kwargs)
 
         # whether paragraphs have been split; if so, can wrap them; this can be
         # overridden in __check_root()
@@ -350,8 +349,7 @@ class XMLFormat(Format):
 
         # if SplitTransform has just split paragraphs, update the dmr
         # schema version and its schema location
-        # XXX this check for 'split.py' isn't perfect; previously checked for
-        #     SplitTransform, but it no longer exists
+        # XXX I don't think this will work any more (but it doesn't need to)
         if root.args.transform is not None and \
                 any(str(t) == 'split.py' for t in root.args.transform):
             # add or update the dmr schema version
@@ -369,16 +367,6 @@ class XMLFormat(Format):
             # sorting attribute properties
             if xmlns_dmr_added:
                 self._props_order_func = xmlns_props_order_func
-
-        # ensure use of the latest encountered namespaces
-        for attr, namespaces in Namespace.namespaces_by_attr.items():
-            # XXX need to integrate xmlns_dmr into the above logic
-            if attr == 'xmlns_dmr':
-                continue
-            if len(namespaces) > 1:
-                # XXX need to add the logic actually to use the latest
-                logger.warning('would use the latest (of %d) %s namespace %s'
-                               % (len(namespaces), attr, namespaces[-1]))
 
         # note whether paragraphs have been split
         self._have_split = \
@@ -403,18 +391,33 @@ class XMLFormat(Format):
             self._current_manual_indent
         indent1 = indent + indent_step * ' '
 
-        # the 'xml_version' attribute overrides version
-        if hasattr(node, 'xml_version'):
-            logger.info('%s: changed version %s to %s' % (
-                node.objpath, node.version, node.xml_version))
-            node.version = node.xml_version
-
         # determine which attributes are to be overridden
         attrs = node.attrs
         attrs_props = node.attrs_props
+        attrs_props_dict = {prop.name: prop for prop in attrs_props}
         override_attrs = {}
         if name and 'name' in attrs and name != attrs['name']:
             override_attrs['name'] = name
+
+        # XXX could generalize this logic if need be
+        if 'xmlns_dm' in attrs:
+            dm_namespaces = Namespace.namespaces_by_attr['xmlns_dm']
+            old_dm_namespace_names = {ns.name for ns in dm_namespaces[:-1]}
+            new_dm_namespace = dm_namespaces[-1]
+            override_attrs['xmlns_dm'] = new_dm_namespace.name
+            if 'xsi_schemaLocation' in attrs_props_dict:
+                schema_location_dict = attrs_props_dict['xsi_schemaLocation']
+                new_schema_location_dict = {}
+                for schema_name, schema_location in \
+                        schema_location_dict.value.items():
+                    if schema_name in old_dm_namespace_names:
+                        new_schema_location_dict[new_dm_namespace.name] = \
+                            new_dm_namespace.location
+                        logger.info('replaced xmlns:dm %s with %s' % (
+                            schema_name, new_dm_namespace.name))
+                    else:
+                        new_schema_location_dict[schema_name] = schema_location
+                override_attrs['xsi_schemaLocation'] = new_schema_location_dict
 
         # retain xmlns_dmr attributes only on dm_document
         # XXX hmm; in theory could use this on interior nodes

@@ -1,6 +1,6 @@
 """Markdown report format plugin."""
 
-# Copyright (c) 2023, Broadband Forum
+# Copyright (c) 2023-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -42,19 +42,27 @@
 
 import os
 import re
+import sys
 import textwrap
 import time
 
 from io import TextIOBase
-from typing import Callable, cast, List, Optional, Tuple, Union
+from typing import Any, Callable, cast, Optional, Union
 
-from .. import __tool_name__, __version__, version
+from .. import version
+from ..logging import Logging
 from ..macro import Macro, MacroArg, MacroException, MacroRef
-from ..node import AbbreviationsItem, Command, CommandRef, DataTypeAccessor, \
-    Event, EventRef, GlossaryItem, Input, Model, Node, Object, ObjectRef, \
-    Output, Parameter, ParameterRef, Profile, Reference, Root
+from ..macros.macros import get_markdown as macros_get_markdown
+from ..node import AbbreviationsItem, _Command, Command, CommandRef, \
+    DataTypeAccessor, Dt_document, _Event, Event, EventRef, GlossaryItem, \
+    _HasContent, Input, Model, Node, Object, ObjectRef, Output, Parameter, \
+    ParameterRef, Profile, Reference, Root
+from ..pandoc import instructions as pandoc_instructions
 from ..path import Path
-from ..utility import Status, Utility
+from ..utility import StatusEnum, Utility
+from ..visitor import Visitor
+
+# XXX should update to use error, warning etc. rather than logger
 
 # XXX could try to generate sensible output when --thisonly is specified
 
@@ -66,7 +74,21 @@ from ..utility import Status, Utility
 #     will need to convert content 'markdown' to HTML)
 
 
-# XXX how to add arguments? would like --markdown-fragment (or similar)
+# whether the markdown is a full report, i.e. the 'diff' transform wasn't run
+def is_full(args) -> bool:
+    return not any(str(t) == 'diff' for t in (args.transform or []))
+
+
+# XXX see macros.get_markdown() for why content markdown might not have been
+#     generated; the reason most likely here is that it's a DT instance, so
+#     markdown won't have been generated for referenced DM model items
+def get_markdown(node: _HasContent, *, logger) -> str:
+    error = Logging.error_func(node, logger)
+    warning = Logging.warning_func(node, logger)
+    info = Logging.info_func(node, logger)
+    debug = Logging.debug_func(node, logger)
+    return macros_get_markdown(node.content, node=node, error=error,
+                               warning=warning, info=info, debug=debug)
 
 
 def _post_init_(logger, args):
@@ -83,17 +105,19 @@ def _post_init_(logger, args):
 
 
 # visit the node tree
-def visit(root: Root, args, *, logger, omit_if_unused) -> None:
-    Report(root, args, omit_if_unused=omit_if_unused, logger=logger)
+def visit(root: Root, args, *, omit_if_unused, rules, logger) -> None:
+    Report(root, args, omit_if_unused=omit_if_unused, rules=rules,
+           logger=logger)
 
 
 class Report:
     """Represents the complete report."""
 
-    def __init__(self, root: Root, args, *, omit_if_unused, logger):
+    def __init__(self, root: Root, args, *, omit_if_unused, rules, logger):
         self.root = root
         self.args = args
         self.omit_if_unused = omit_if_unused
+        self.rules = rules
         self.logger = logger
         self.toc = ToC(logger)
 
@@ -101,20 +125,23 @@ class Report:
 
     def output(self) -> None:
         self.toc.init()
-        self.output_metadata()
-        self.output_begin()
-        self.output_banner()
-        self.output_license()
-        self.output_summary()
-        self.output_data_types()
-        self.output_glossary()
-        self.output_abbreviations()
-        self.output_references()
-        self.output_legend()
-        self.output_models()
-        self.output_footer()
-        self.output_end()
-        self.output_toc()
+        if self.args.brief:
+            self.output_models()
+        else:
+            self.output_metadata()
+            self.output_begin()
+            self.output_banner()
+            self.output_license()
+            self.output_summary()
+            self.output_data_types()
+            self.output_glossary()
+            self.output_abbreviations()
+            self.output_references()
+            self.output_legend()
+            self.output_models()
+            self.output_footer()
+            self.output_end()
+            self.output_toc()
 
     # XXX would like to set header-includes in a separate block at the bottom,
     #     but commonmark seems to support only a single metadata block and it
@@ -123,13 +150,19 @@ class Report:
         # this assumes that keylast is the full path
         _, title = os.path.split(self.root.xml_files[-1].keylast)
 
-        # indent styles and scripts 14 spaces to be indented 2 spaces past
-        # 'header-includes:' in the YAML (see below)
+        # YAML indentation in the print() calls below
+        prefix = 12 * ' '
+
+        # pandoc instructions
+        instructions = textwrap.indent(pandoc_instructions(),
+                                       prefix=prefix + '  ')
+
+        # styles and scripts
         # XXX need to work out what we need from bbf.css!
         s_and_s = styles_and_scripts
         if self.root.args.show:
             s_and_s += '\n\n' + link_styles.strip()
-        s_and_s = textwrap.indent(s_and_s, prefix=15 * ' ')
+        s_and_s = textwrap.indent(s_and_s, prefix=prefix + '    ')
 
         # this is the first thing in the output file, so no initial newline
         # XXX if using the default pandoc HTML template, it's important NOT
@@ -137,25 +170,15 @@ class Report:
         self.print('''\
             ---
             comment: |
-              This is commonmark_x (extended commonmark). Here's an example
-              pandoc command:
-                LUA_PATH="install/pandoc/?.lua;;" pandoc-3.0
-                    --standalone
-                    --from commonmark_x
-                    --data-dir install/pandoc
-                    --resource-path install/pandoc
-                    --lua-filter list-table.lua
-                    --to html-derived-writer.lua
-                    tr-135-1-4-2-cwmp.md
-                    --output tr-135-1-4-2-cwmp.html
+%s
             title: ''
             pagetitle: %s
             lang: en-us
             document-css: false
             header-includes:
-             - |
+              - |
 %s
-            ---''' % (title, s_and_s), noescape=True)
+            ---''' % (instructions, title, s_and_s), noescape=True)
 
     def output_begin(self) -> None:
         self.print('\n:::::: {#main}')
@@ -167,8 +190,8 @@ class Report:
 
         # use the last model (usually there will be only one, but if
         # generating diffs of two models in the same file there will be two)
-        dm_document = xml_file.dm_document
-        model = dm_document.models[-1]
+        document = xml_file.document
+        model = document.models[-1]
 
         # try to get the title from the first comment's first line
         title = ''
@@ -188,8 +211,17 @@ class Report:
             title += 'Object definition'
 
         # add a 'changes' indicator
-        if any(str(t) == 'diff' for t in (self.args.transform or [])):
+        if not is_full(self.args):
             title += ' (changes)'
+
+        # add any additional file info
+        # XXX the presentation needs to be improved
+        info = ''
+        if file_info := document.file_info:
+            info = ', '.join('%s: %s' % (name, value) for name, value in
+                             file_info.items() if value)
+            if info:
+                info = '## %s' % info
 
         # BBF and logo information
         bbf_url = 'https://www.broadband-forum.org'
@@ -198,7 +230,7 @@ class Report:
         # relative path (only works with web server) and file name
         # XXX does the relative path need to be customizable?
         rel_path = './'
-        file = dm_document.file_safe
+        file = document.file_safe
 
         # style information
         classes = ['list-table', 'full-width']
@@ -215,6 +247,8 @@ class Report:
 
                 # %s {.unnumbered .unlisted}
 
+                %s
+
                 # [%s](%s#%s) {.unnumbered .unlisted}
 
               - []{rowspan=2}
@@ -223,16 +257,29 @@ class Report:
               - ### DATA MODEL DEFINITION {.unnumbered .unlisted}''' % (
             ' '.join('.%s' % cls for cls in classes),
             ','.join(str(wid) for wid in widths), header_rows, logo_url,
-            bbf_url, title, file, rel_path, file))
+            bbf_url, title, info, file, rel_path, file))
 
     def output_summary(self) -> None:
+        document = self.root.xml_files[-1].document
+        sections = []
+
         # disable this because any information in the top-level description
         # should now be in PROJECT.yaml
-        if False and (summary := self.root.xml_files[
-                -1].dm_document.description.content.markdown):
+        if False and (section := get_markdown(document.description,
+                                              logger=self.logger)):
+            sections.append(section)
+
+        # but do output top-level DT annotation
+        # XXX need to extend annotation support to all node types
+        if isinstance(document, Dt_document) and (section := get_markdown(
+                document.annotation, logger=self.logger)):
+            sections.append(section)
+
+        # output the summary
+        if sections:
             self.output_header(1, 'Summary')
             self.print()
-            self.print(summary.strip())
+            self.print('\n\n'.join(section.strip() for section in sections))
 
     def output_license(self) -> None:
         if comment := self.root.xml_files[-1].comments[0].text:
@@ -336,8 +383,8 @@ class Report:
                     if data_type.list:
                         facets += Elem.format(data_type.list)
                     base = '[%s](#%s)%s' % (base, base_type.anchor, facets)
-                description = \
-                    data_type.description_inherited.content.markdown or ''
+                description = get_markdown(data_type.description_inherited,
+                                           logger=self.logger)
                 table.add_row(name, base, description)
             self.print(table.markdown)
 
@@ -347,10 +394,11 @@ class Report:
             self.output_header(1, 'Glossary')
             table = Table('ID', 'Description', logger=self.logger,
                           classes=['middle-width', 'partial-border'])
-            for item in cast(List[GlossaryItem],
+            for item in cast(list[GlossaryItem],
                              sorted(items, key=lambda i: i.id.lower())):
                 # XXX need to define an anchor
-                table.add_row(item.id, item.description.content.markdown or '')
+                table.add_row(item.id, get_markdown(item.description,
+                                                    logger=self.logger))
             self.print(table.markdown)
 
     def output_abbreviations(self) -> None:
@@ -359,10 +407,11 @@ class Report:
             self.output_header(1, 'Abbreviations')
             table = Table('ID', 'Description', logger=self.logger,
                           classes=['middle-width', 'partial-border'])
-            for item in cast(List[AbbreviationsItem],
+            for item in cast(list[AbbreviationsItem],
                              sorted(items, key=lambda i: i.id.lower())):
                 # XXX need to define an anchor
-                table.add_row(item.id, item.description.content.markdown or '')
+                table.add_row(item.id, get_markdown(item.description,
+                                                    logger=self.logger))
             self.print(table.markdown)
 
     def output_references(self) -> None:
@@ -382,7 +431,7 @@ class Report:
         ''', re.VERBOSE)
 
         # helper to define missing hyperlinks for known document types
-        def get_hyperlinks(ref: Reference) -> List[str]:
+        def get_hyperlinks(ref: Reference) -> list[str]:
             if ref.hyperlinks:
                 return [h.text for h in ref.hyperlinks]
             elif ref.organization.text in {'IETF'} and \
@@ -414,12 +463,12 @@ class Report:
         if items:
             self.output_header(1, 'References')
             table = Table(logger=self.logger)
-            for item in cast(List[Reference],
+            for item in cast(list[Reference],
                              sorted(items, key=lambda i: i.id.lower())):
                 name = '[[%s]{#%s}]' % (item.id, item.anchor)
                 if hyperlinks := get_hyperlinks(item):
                     name = '[%s](%s)' % (name, hyperlinks[0])
-                    if len(hyperlinks) > 1:
+                    if len(set(hyperlinks)) > 1:
                         secondary = ', '.join(h for h in hyperlinks[1:])
                         self.logger.warning('%s: ignored secondary '
                                             'hyperlinks %s' % (
@@ -437,10 +486,10 @@ class Report:
 
     # XXX the legend is hardly worth it for CWMP; should omit it?
     def output_legend(self) -> None:
-        models = self.root.xml_files[-1].dm_document.models
+        models = self.root.xml_files[-1].document.models
         if models:
             usp = any(model.usp for model in
-                      self.root.xml_files[-1].dm_document.models)
+                      self.root.xml_files[-1].document.models)
             self.output_header(1, 'Legend')
             table = Table(logger=self.logger,
                           classes=['middle-width', 'partial-border'])
@@ -462,7 +511,7 @@ class Report:
 
     def output_models(self) -> None:
         for xml_file in self.root.xml_files:
-            for model in xml_file.dm_document.models:
+            for model in xml_file.document.models:
                 if not model.is_hidden:
                     self.output_model(model)
 
@@ -478,27 +527,28 @@ class Report:
             1.4, then it will indicate support for version 1.4. The version
             number associated with each object and parameter is shown in
             the **Version** column.''')]
-        if model.description.content.markdown:
-            comps.append(model.description.content.markdown)
+        if markdown := get_markdown(model.description, logger=self.logger):
+            comps.append(markdown)
 
-        self.output_header(1, '%s Data Model' % model.name, show=3)
-        self.print('\n\n'.join(comps))
+        if not self.args.brief:
+            self.output_header(1, '%s Data Model' % model.name, show=3)
+            self.print('\n\n'.join(comps))
 
         # output the main table (which doesn't contain profiles)
         table = Table('Name', 'Type', 'Write', 'Description', 'Object Default',
                       'Version', logger=self.logger,
                       classes=['full-width', 'partial-border',
                                'data-model-table'])
+        # XXX strictly should use Visitor group-ordering logic,
+        #     like .output_node()
         for node in model.elems:
             if not node.is_hidden and node not in model.profiles:
                 self.output_node(node, table)
         self.print(table.markdown)
 
-        # output the 'Inform and Notification Requirements' tables
-        self.output_notification_tables(model)
-
-        # output the profile tables
-        self.output_profiles(model.profiles)
+        if is_full(self.args) and not self.args.brief:
+            self.output_notification_tables(model)
+            self.output_profiles(model.profiles)
 
     def output_notification_tables(self, model: Model) -> None:
         # determine whether this is a USP model
@@ -508,42 +558,55 @@ class Report:
         parameters = model.parameters + [param for obj in model.objects for
                                          param in obj.parameters]
 
-        # output the header (different for USP)
-        self.output_header(2, 'Notification Requirements' if usp else
-                           'Inform and Notification Requirements')
+        # header (different for USP) is output lazily
+        text = 'Notification Requirements' if usp else \
+            'Inform and Notification Requirements'
+        header = {'done': False, 'text': text}
 
         # output the first three tables (not for USP)
         if not usp:
             self.output_notification_table(
                     parameters, 'Forced Inform Parameters',
-                    lambda p: p.forcedInform)
+                    lambda p: p.forcedInform, header=header)
             self.output_notification_table(
                     parameters, 'Forced Active Notification Parameters',
-                    lambda p: p.activeNotify == 'forceEnabled')
+                    lambda p: p.activeNotify == 'forceEnabled', header=header)
             self.output_notification_table(
                     parameters, 'Default Active Notification Parameters',
-                    lambda p: p.activeNotify == 'forceDefaultEnabled')
+                    lambda p: p.activeNotify == 'forceDefaultEnabled',
+                    header=header)
 
         # output the last table (it lists objects and parameters separately
         title = 'Parameters for which %s Notification MAY be Denied' % (
             'Value Change' if usp else 'Active')
         self.output_notification_table(parameters, title,
                                        lambda p: p.activeNotify == 'canDeny',
-                                       separate_objects=True)
+                                       header=header, separate_objects=True)
 
-    def output_notification_table(self, parameters: List[Parameter],
+    def output_notification_table(self, parameters: list[Parameter],
                                   title: str, predicate: Callable, *,
+                                  header: Optional[dict[str, Any]] = None,
                                   separate_objects: bool = False) -> None:
         def node_class(node) -> str:
             status = node.status_inherited
-            return '%s%s' % ('%s-' % status.name if status.name != 'current'
+            return '%s%s' % ('%s-' % status.value if status.value != 'current'
                              else '', node.typename)
+
+        # do nothing if there's nothing to output
+        parameters_ = [param for param in parameters if predicate(param)]
+        if not parameters_:
+            return
+
+        # output the level 3 header if not already done
+        if header is not None and not header['done']:
+            self.output_header(2, header['text'])
+            header['done'] = True
 
         self.output_header(3, title)
         table = Table('Parameter', logger=self.logger,
                       classes=['middle-width', 'partial-border'])
         current_object = None
-        for parameter in [param for param in parameters if predicate(param)]:
+        for parameter in parameters_:
             # (a) each row is the full parameter path
             if not separate_objects:
                 table.add_row(
@@ -564,7 +627,7 @@ class Report:
 
         self.print(table.markdown)
 
-    def output_profiles(self, profiles: List[Profile]) -> None:
+    def output_profiles(self, profiles: list[Profile]) -> None:
         visible_profiles = [prof for prof in profiles if not prof.is_hidden]
 
         if visible_profiles:
@@ -609,7 +672,7 @@ class Report:
                                        internal_only=True)
 
         self.output_header(3, '%s Profile' % profile.name, profile.anchor,
-                           stat=profile.status.name)
+                           stat=profile.status.value)
 
         # get a list of its non-internal referenced base and extends profiles
         refs = [profile.baseNode] + profile.extendsNodes
@@ -678,20 +741,20 @@ class Report:
 
             return ' '.join(args)
 
+        def tool_name():
+            return os.path.basename(sys.argv[0])
+
         # use UTC dates and times
         now = time.gmtime()
         now_date = time.strftime('%Y-%m-%d', now)
         now_time = time.strftime('%H:%M:%S', now)
 
-        # version numbers ending in '+' are later interim versions
-        extra = ' (INTERIM VERSION)' if __version__.endswith('+') else ''
-
         self.print('''
             ---
 
-            Generated by %s on %s at %s UTC%s.\\
-            %s %s''' % (version(as_markdown=True), now_date, now_time, extra,
-                        __tool_name__, args_string()))
+            Generated by %s on %s at %s UTC.\\
+            %s %s''' % (version(as_markdown=True), now_date, now_time,
+                        tool_name(), args_string()))
 
     def output_header(self, level: int, text: str, anchor: str = '', *,
                       stat: str = 'current', notoc: bool = False,
@@ -706,7 +769,10 @@ class Report:
 
     def output_node(self, node: Node, table: 'Table', *,
                     norecurse: bool = False,
-                    footnotes: Optional[List[Tuple[str, str]]] = None) -> None:
+                    footnotes: Optional[list[tuple[str, str]]] = None) -> None:
+        if self.omit_if_unused and node.is_used is False:
+            return
+
         elem = Elem.create(node, toc=self.toc, logger=self.logger,
                            footnotes=footnotes)
         row = elem.row
@@ -716,9 +782,13 @@ class Report:
                 table.add_separator(classes=elem.section_classes, elem=elem)
             table.add_row(*row, classes=elem.row_classes, elem=elem)
             if not norecurse:
-                for child in node.elems:
-                    if not child.is_hidden:
-                        self.output_node(child, table, footnotes=footnotes)
+                # XXX this uses the Visitor element-ordering logic, which
+                #     should be made easier to use
+                groups = Visitor.get_groups(node, rules=self.rules)
+                for groupname, group in groups.items():
+                    for child in group:
+                        if not child.is_hidden:
+                            self.output_node(child, table, footnotes=footnotes)
 
     def output_end(self) -> None:
         self.print('\n::::::')
@@ -732,7 +802,7 @@ class Report:
     def include(self, node: Node) -> bool:
         return not self.omit_if_unused or node.is_used
 
-    def print(self, text: Union[str, List[str]] = '', *, width: int = 0,
+    def print(self, text: Union[str, list[str]] = '', *, width: int = 0,
               nodedent: bool = False, noescape: bool = False) -> None:
         if isinstance(text, list):
             text = '\n'.join(text)
@@ -740,9 +810,11 @@ class Report:
         if not nodedent:
             text = textwrap.dedent(text)
 
-        # XXX this might be insufficient
+        # XXX it's not necessary to escape '<' and '>' characters, because we
+        #     assume that the pandoc raw_html extension will be disabled
         if not noescape:
-            text = re.sub(r'([<>])', r'\\\1', text)
+            # text = re.sub(r'([<>])', r'\\\1', text)
+            pass
 
         # XXX experimental; needs more work; need to be careful with lists...
         if width > 0:
@@ -882,8 +954,8 @@ class ToC:
 
 class Table:
     def __init__(self, *labels, logger,
-                 widths: Optional[List[int]] = None,
-                 classes: Optional[List[str]] = None):
+                 widths: Optional[list[int]] = None,
+                 classes: Optional[list[str]] = None):
         self.labels = (labels, None, None)
         self.logger = logger
         self.widths = widths
@@ -892,18 +964,18 @@ class Table:
 
     # a separator is indicated by a row of None
     # XXX passing elem is temporary (just for reporting)
-    def add_separator(self, *, classes: Optional[List[str]] = None,
+    def add_separator(self, *, classes: Optional[list[str]] = None,
                       elem=None) -> None:
         self.rows.append((None, classes, elem))
 
-    def add_row(self, *row, classes: Optional[List[str]] = None,
+    def add_row(self, *row, classes: Optional[list[str]] = None,
                 elem=None) -> None:
         self.rows.append((row, classes, elem))
 
     # the markdown always starts with an empty line, but is not terminated with
     # an empty line (the caller is responsible for that)
     @property
-    def markdown(self) -> List[str]:
+    def markdown(self) -> list[str]:
         classes = '' if not self.classes else \
             ' %s' % ' '.join('.%s' % cls for cls in self.classes)
         headers = '' if self.labels[0] else ' header-rows=0'
@@ -921,7 +993,7 @@ class Table:
             # convert classes to a string
             classes_str = ''
             if classes:
-                classes = cast(List[str], classes)
+                classes = cast(list[str], classes)
                 classes_str = ' '.join('.%s' % cls for cls in classes)
 
             # a row of None indicates a separator, which opens (if there are
@@ -994,7 +1066,10 @@ class Elem:
 
     @classmethod
     def create(cls, node: Node, **kwargs):
-        name = '%sElem' % type(node).__name__
+        name = type(node).__name__
+        name = name.replace('Dt_', '')
+        name = name[:1].upper() + name[1:]
+        name = '%sElem' % name
         ctor = cls._ctors.get(name, Elem)
         return ctor(node, **kwargs)
 
@@ -1023,17 +1098,17 @@ class Elem:
 
     # subclasses can override this
     @property
-    def section_classes(self) -> List[str]:
+    def section_classes(self) -> list[str]:
         return []
 
     # subclasses can override this
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return []
 
     # subclasses can override this
     @property
-    def row(self) -> Optional[Tuple[str, ...]]:
+    def row(self) -> Optional[tuple[str, ...]]:
         return None
 
     # XXX some of these helpers aren't type-safe; they should be further
@@ -1041,15 +1116,15 @@ class Elem:
 
     @property
     def status_prefix(self) -> str:
-        status = self.node.object_status_inherited
-        if status.name != 'current':
-            return status.name + '-'
+        status = self.node.h_status_inherited
+        if status.value != 'current':
+            return status.value + '-'
         else:
             return ''
 
     @property
     def arrow_prefix(self) -> str:
-        if self.node.instance_in_path((Input, Event)):
+        if self.node.instance_in_path((Input, _Event)):
             return self.RARR + ' '
         elif self.node.instance_in_path(Output):
             return self.LARR + ' '
@@ -1058,15 +1133,18 @@ class Elem:
 
     @property
     def argument_prefix(self) -> str:
-        if self.node.instance_in_path((Command, CommandRef, Event, EventRef)):
+        if self.node.instance_in_path((_Command, CommandRef, _Event,
+                                       EventRef)):
             return 'argument-'
         else:
             return ''
 
+    # XXX DT instances can use 'createDelete'
     access_map = {
         'readOnly': 'R',
         'readWrite': 'W',
-        'writeOnceReadOnly': 'WO'
+        'writeOnceReadOnly': 'WO',
+        'createDelete': 'C'
     }
 
     @property
@@ -1076,11 +1154,11 @@ class Elem:
         # commands and events don't have access attributes
         if node.instance_in_path(Input):
             return 'W'
-        elif node.instance_in_path((Output, Event)):
+        elif node.instance_in_path((Output, _Event)):
             return 'R'
 
         # noinspection PyUnresolvedReferences
-        access = node.access
+        access = node.access.value
         if access not in self.access_map:
             # need to update access_map
             self.logger.warning('%s: unsupported access %s' % (
@@ -1108,11 +1186,15 @@ class Elem:
             return r'\-'
 
         # noinspection PyUnresolvedReferences
-        requirement = node.requirement
+        requirement = node.requirement.value
         if requirement not in self.requirement_map:
             self.logger.warning('%s: unsupported requirement %s' % (
                 node.nicepath, requirement))
         return self.requirement_map.get(requirement, '?%s?' % requirement)
+
+    @property
+    def default_string(self) -> str:
+        return r'\-'
 
     @property
     def footref(self) -> str:
@@ -1151,35 +1233,34 @@ class ModelTableElem(Elem):
     def _toc_entry(self) -> None:
         node = self.node
         self.toc.entry(2, node.objpath, node.anchor, split=True,
-                       stat=node.status.name, show=3, sort=3)
+                       stat=node.status.value, show=3, sort=3)
 
     # XXX it would be clearer not to use this, but instead always use node
     #     status directly as needed
-    # XXX shouldn't use 'current'; should use Status.default
     def _set_section_properties(self) -> None:
         node = self.node
 
         # only non-current nodes can start new sections
-        if node.object_status_inherited.name == 'current':
+        if node.h_status_inherited.value == StatusEnum.default:
             pass
 
         # ensure that this isn't the root object (if it is, something else
         # has gone wrong
-        elif not (object_parent := node.object_parent):
+        elif not (h_parent := node.h_parent):
             pass
 
         # if the parent node is current, this is the root of a showable tree
-        elif object_parent.object_status_inherited.name == 'current':
+        elif h_parent.h_status_inherited.value == 'current':
             # some old data models might not use {{deprecated}} etc. macros
             # noinspection PyUnresolvedReferences
             has_status_macro = any(
                     status in node.description.content.macro_refs for status in
-                    Status.names)
+                    StatusEnum.values)
             self.need_showable_class = has_status_macro
 
         # if this node is not current (in its own right), showable2 is set so
         # its description can be expanded and collapsed
-        elif node.status.name != 'current':
+        elif node.status.value != 'current':
             self.need_showable2_class = True
             self.need_hide_class = True
 
@@ -1208,14 +1289,14 @@ class ModelTableElem(Elem):
         return retval
 
     @property
-    def section_classes(self) -> List[str]:
+    def section_classes(self) -> list[str]:
         classes = []
         if self.need_showable_class:
             classes.append('showable')
         return classes + super().section_classes
 
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         classes = []
 
         # the node version can be greater than the model version if it was
@@ -1257,11 +1338,11 @@ class ModelTableElem(Elem):
                 # {{<status>}} macro reference (where <status> is the parent
                 # node status), in which case add 'chevron'
                 found = any(isinstance(item, MacroRef) and item.name ==
-                            node.parent.status.name for item in content.items)
+                            node.parent.status.value for item in content.items)
                 classes.append(elem.hide_class if not found else 'chevron')
 
             # if called from {{span}} and its caller is {{<status>}} (as above)
-            elif len(stack) > 2 and stack[-3].name == node.parent.status.name:
+            elif len(stack) > 2 and stack[-3].name == node.parent.status.value:
                 # add the hide class unless the content is empty, in which
                 # case add 'click'
                 classes.append(elem.hide_class if content.items else 'click')
@@ -1271,12 +1352,12 @@ class ModelTableElem(Elem):
 
 class ObjectElem(ModelTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + self.argument_prefix + 'object'] + \
                super().row_classes
 
     @property
-    def row(self) -> Optional[Tuple[str, ...]]:
+    def row(self) -> Optional[tuple[str, ...]]:
         node = cast(Object, self.node)
         # unnamed objects are omitted
         # XXX should extend this check to other node types?
@@ -1289,7 +1370,7 @@ class ObjectElem(ModelTableElem):
         return (self.arrow_prefix + name,
                 self.type_string,
                 self.access_string,
-                node.description.content.markdown or '', r'\-',
+                get_markdown(node.description, logger=self.logger), r'\-',
                 node.version_inherited.name)
 
     @property
@@ -1302,20 +1383,19 @@ class ObjectElem(ModelTableElem):
 
 class ParameterElem(ModelTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + self.argument_prefix + 'parameter'] + \
                super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         node = cast(Parameter, self.node)
         name = '[%s]{#%s}' % (node.name, node.anchor)
         return (self.arrow_prefix + name,
                 self.type_string,
                 self.access_string,
-                node.description.content.markdown or '',
-                (Utility.nice_string(node.syntax.default)
-                 if node.syntax.default.type == 'object' else r'\-'),
+                get_markdown(node.description, logger=self.logger),
+                self.default_string,
                 node.version_inherited.name)
 
     @property
@@ -1328,62 +1408,74 @@ class ParameterElem(ModelTableElem):
                 Elem.format(node, typ=True, noescape=True))
         return text
 
+    @property
+    def default_string(self) -> str:
+        node = cast(Parameter, self.node)
+        if not (default := node.syntax.default) or default.type != 'object':
+            return super().default_string
+
+        value = default.value
+        if node.syntax.list and \
+                (bracketed := re.match(r'^\s*\[\s*(.*?)\s*]\s*$', value)):
+            value = bracketed[1]
+        return Utility.nice_string(value, empty=r'*\<Empty\>*', escape=True)
+
 
 class CommandElem(ModelTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'command'] + super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         node = cast(Command, self.node)
 
         self._toc_entry()
 
         name = '[%s]{#%s}' % (node.name, node.anchor)
         return (name, 'command', r'\-',
-                node.description.content.markdown or '', r'\-',
+                get_markdown(node.description, logger=self.logger), r'\-',
                 node.version_inherited.name)
 
 
 class InputElem(ModelTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'argument-container'] + \
                super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         return (self.arrow_prefix + 'Input.', 'arguments', r'\-',
                 'Input arguments.', r'\-', '')
 
 
 class OutputElem(ModelTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'argument-container'] + \
                super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         return (self.arrow_prefix + 'Output.', 'arguments', r'\-',
                 'Output arguments.', r'\-', '')
 
 
 class EventElem(ModelTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'event'] + super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         node = cast(Event, self.node)
 
         self._toc_entry()
 
         name = '[%s]{#%s}' % (node.name, node.anchor)
         return (name, 'event', r'\-',
-                node.description.content.markdown or '', r'\-',
+                get_markdown(node.description, logger=self.logger), r'\-',
                 node.version_inherited.name)
 
 
@@ -1391,22 +1483,22 @@ class ProfileTableElem(Elem):
     @property
     def footref(self) -> str:
         node = self.node
-        if self.footnotes is None or node.status.name == 'current':
+        if self.footnotes is None or node.status.value == 'current':
             return ''
         else:
             self.footnotes.append('This %s is %s.' % (
-                node.elemname, node.status.name.upper()))
+                node.elemname, node.status.value.upper()))
             return '^%s^' % len(self.footnotes)
 
 
 class ObjectRefElem(ProfileTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + self.argument_prefix + 'object'] + \
                super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         node = cast(ObjectRef, self.node)
         ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, self.requirement_string + self.footref
@@ -1414,12 +1506,12 @@ class ObjectRefElem(ProfileTableElem):
 
 class ParameterRefElem(ProfileTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + self.argument_prefix + 'parameter'] + \
                super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         node = cast(ParameterRef, self.node)
         ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, self.requirement_string + self.footref
@@ -1427,11 +1519,11 @@ class ParameterRefElem(ProfileTableElem):
 
 class CommandRefElem(ProfileTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'command'] + super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         node = cast(CommandRef, self.node)
         ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, r'\-' + self.footref
@@ -1439,33 +1531,33 @@ class CommandRefElem(ProfileTableElem):
 
 class InputRefElem(ProfileTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'argument-container'] + \
                super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         return 'Input.', r'\-' + self.footref
 
 
 class OutputRefElem(ProfileTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'argument-container'] + \
                super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         return 'Output.', r'\-' + self.footref
 
 
 class EventRefElem(ProfileTableElem):
     @property
-    def row_classes(self) -> List[str]:
+    def row_classes(self) -> list[str]:
         return [self.status_prefix + 'event'] + super().row_classes
 
     @property
-    def row(self) -> Tuple[str, ...]:
+    def row(self) -> tuple[str, ...]:
         node = cast(EventRef, self.node)
         ref = '[%s](#%s)' % (node.ref, node.anchor)
         return ref, r'\-' + self.footref
@@ -1832,6 +1924,7 @@ global_styles = r'''
   :root {
     --background-color: white;
     --foreground-color: black;
+    --diff-background-color: aliceblue;
     --link-color: blue;
     --parameter-color: white;
     --object-color: #ffff99;
@@ -1856,6 +1949,7 @@ global_styles = r'''
   :root {
     --background-color: black;
     --foreground-color: white;
+    --diff-background-color: #0f0700;
     --link-color: lightblue;
     --parameter-color: black;
     --object-color: #bbbb44;
@@ -1869,6 +1963,9 @@ global_styles = r'''
     --stripe-color-deprecated: #555555;
     --stripe-color-obsoleted: #444444;
     --stripe-color-deleted: #333333;
+  }
+  .hoverlink {
+    filter: invert(1);
   }
 }
 
@@ -1966,7 +2063,7 @@ td > p:last-of-type {
 
 /* XXX this is a bad name */
 .diffs {
-    background-color: aliceblue;
+    background-color: var(--diff-background-color);
     opacity: 0.8;
 }
 

@@ -50,9 +50,9 @@ Note::
 
 import re
 
-from typing import Any, cast, Dict, Optional, Tuple, Type, Union
+from typing import Any, cast, Union
 
-from ..content import Content
+from ..content import CLOSE_DIV, Content, OPEN_DIV
 from ..exception import MacroException
 from ..macro import Macro, MacroRef
 from ..node import AbbreviationsItem, DataType, DataTypeAccessor, \
@@ -61,7 +61,7 @@ from ..node import AbbreviationsItem, DataType, DataTypeAccessor, \
     Template, typename, _ValueFacet
 from ..path import follow_reference
 from ..property import Null
-from ..utility import Status, Utility
+from ..utility import ScopeEnum, StatusEnum, Utility
 
 
 # can change this while debugging
@@ -95,17 +95,17 @@ MACROS_PATH_QUIET = PATH_QUIET
 
 # core utilities are declared first
 
-NodeType = Type['Node']
+NodeType = type['Node']
 
 
 # like cast() but raises MacroException if the node isn't of the specified type
 # XXX this doesn't give the type safety that we'd like; need to use generics?
 # XXX would like a tuple version of this for when the node can be of one of
 #     several types? (but should use the class hierarchy for this)
-def cast_node(node_type_or_types: Union[NodeType, Tuple[NodeType, ...]],
+def cast_node(node_type_or_types: Union[NodeType, tuple[NodeType, ...]],
               node: NodeType, *, prefix: str = '') -> NodeType:
     node_types = node_type_or_types \
-        if isinstance(node_type_or_types, Tuple) else (node_type_or_types,)
+        if isinstance(node_type_or_types, tuple) else (node_type_or_types,)
     if not isinstance(node, node_types):
         sep = ' ' if prefix else ''
         typenames = Utility.nicer_list([typename(nt) for nt in node_types])
@@ -141,7 +141,7 @@ def get_markdown(content: Content, *, node, force: bool = False,
 
 
 # filter out known keyword arguments
-def unknown_kwargs(**kwargs) -> Dict[str, Any]:
+def unknown_kwargs(**kwargs) -> dict[str, Any]:
     return {n: v for n, v in kwargs.items() if
             n not in {'macro', 'node', 'active', 'error', 'warning', 'info',
                       'debug'}}
@@ -158,7 +158,7 @@ def maybe_empty(text: str) -> str:
 def expand_itemref(ref, scope_or_status, *, node, stack, warning,
                    **_kwargs) -> str:
     def nameonly(nod) -> str:
-        return nod.object_nameonly if isinstance(nod, Object) else nod.name
+        return nod.h_nameonly if isinstance(nod, Object) else nod.name
 
     macro = stack[-1]
     assert macro.name in {'command', 'event', 'param', 'object'}
@@ -168,11 +168,11 @@ def expand_itemref(ref, scope_or_status, *, node, stack, warning,
     elemname = macro_to_elemname.get(macro.name, macro.name)
 
     # separate out scope and status
-    # XXX there should be a Scope utility class; cf Status and Version
+    # XXX should make better use of the ScopeEnum and StatusEnum classes
     scope = scope_or_status if scope_or_status in {
-        'normal', 'model', 'object'} else 'normal'
-    status = Status(scope_or_status if scope_or_status in Status.names
-                    else node.status_inherited.name)
+        'normal', 'model', 'object', 'absolute'} else 'normal'
+    status = StatusEnum(scope_or_status if scope_or_status in StatusEnum.values
+                        else node.status_inherited.value)
 
     # warn if the reference has leading and/or trailing whitespace
     if ref != ref.strip():
@@ -193,7 +193,7 @@ def expand_itemref(ref, scope_or_status, *, node, stack, warning,
         if item is node.parent:
             return "*%s*" % nameonly(item)
         else:
-            return "*[%s](#%s)*" % (nameonly(item), item.anchor)
+            return "[*%s*](#%s)" % (nameonly(item), item.anchor)
 
     # otherwise follow the reference
     ref_node = follow_reference(node, ref, scope=scope,
@@ -211,17 +211,16 @@ def expand_itemref(ref, scope_or_status, *, node, stack, warning,
 
     # check that the referenced item is not "more deprecated" than this node
     if ref_node.status_inherited > status:
-        extra = ' (scope_or_status %s status %s)' % (scope_or_status, status)
-        raise MacroException('reference to %s %s %s%s' % (
+        raise MacroException('reference to %s %s %s' % (
             ref_node.status_inherited, ref_node.typename,
-            ref_node.objpath, extra))
+            ref_node.objpath))
 
     # remove leading hashes and dots from the reference; if this gives an
     # empty string, e.g., {{object|#}}, use the actual name
     ref = re.sub(r'^#*\.*', '', ref)
     if ref == '':
         ref = nameonly(ref_node)
-    return "*[%s](#%s)*" % (ref, ref_node.anchor)
+    return "[*%s*](#%s)" % (ref, ref_node.anchor)
 
 
 # behavior depends on the arguments:
@@ -240,11 +239,11 @@ def expand_value(value, param, scope_or_status, *, node, stack, args,
         raise MacroException('empty value but non-empty param')
 
     # separate out scope and status
-    # XXX there should be a Scope utility class; cf Status and Version
+    # XXX should make better use of the ScopeEnum and StatusEnum classes
     scope = scope_or_status if scope_or_status in {
-        'normal', 'model', 'object'} else 'normal'
-    status = Status(scope_or_status if scope_or_status in Status.names
-                    else node.status_inherited.name)
+        'normal', 'model', 'object', 'absolute'} else 'normal'
+    status = StatusEnum(scope_or_status if scope_or_status in StatusEnum.values
+                        else node.status_inherited.value)
 
     # if not within a model, the node should be a data type description
     if not node.model_in_path:
@@ -301,12 +300,13 @@ def expand_value(value, param, scope_or_status, *, node, stack, args,
                 value_node.status_inherited, value_node.typename,
                 value_node.objpath, value))
 
-        return "[*%s*](#%s)" % (value, values[value].anchor)
+        style = '*' if macro.name == 'enum' else '`'
+        return "[%s%s%s](#%s)" % (style, value, style, values[value].anchor)
 
 
 # this is called by expand_value()
-def expand_values(values: Dict[str, _ValueFacet], *, owner, stack, chunks,
-                  warning, **kwargs) -> Content:
+def expand_values(values: dict[str, _ValueFacet], *, owner, stack, warning,
+                  **kwargs) -> Content:
     macro = stack[-1]
 
     # this is only valid if this macro was called from {{div}}
@@ -345,11 +345,19 @@ def expand_values(values: Dict[str, _ValueFacet], *, owner, stack, chunks,
         content = description.content
 
         # empty key is reported as '<Empty>', with default '{{empty}}' content
+        empty = '<Empty>'
         if key == '':
-            key = r'<Empty>'
+            key = empty
             if not content:
                 content = Content('{{empty|nocapitalize}}')
-        text += '* [*%s*]{#%s}' % (key, value.anchor)
+        # enums are italicized with escaped angle brackets; patterns are
+        # verbatim
+        if macro.name != 'enum' and key != empty:
+            style = '`'
+        else:
+            style = '*'
+            key = re.sub(r'([<>])', r'\\\1', key)
+        text += '* [%s%s%s]{#%s}' % (style, key, style, value.anchor)
 
         # process the description
         markdown = get_markdown(content, node=description, stack=stack,
@@ -379,9 +387,10 @@ def expand_values(values: Dict[str, _ValueFacet], *, owner, stack, chunks,
             items.append('OPTIONAL')
 
         # deprecated etc.? (not included if the corresponding macro is present)
-        status_name = value.status.name
-        if status_name != 'current' and status_name not in content.macro_refs:
-            items.append(status_name.upper())
+        status_value = value.status.value
+        if status_value != 'current' and \
+                status_value not in content.macro_refs:
+            items.append(status_value.upper())
 
         # explicit version?
         if value.version:
@@ -404,6 +413,15 @@ def expand_values(values: Dict[str, _ValueFacet], *, owner, stack, chunks,
 def expand_abbref(id, **_kwargs) -> str:
     item = find_node(AbbreviationsItem, id)
     return '[%s](#%s)' % (item.id, item.anchor)
+
+
+def expand_access(node, **_kwargs) -> str:
+    parameter = cast_node(Parameter, node.parent)
+    access = parameter.access
+    if access == 'writeOnceReadOnly':
+        return "Once it's been set, this parameter is immutable."
+    else:
+        return ''
 
 
 # noinspection PyShadowingBuiltins
@@ -439,16 +457,17 @@ def expand_datatype(arg, *, node: _HasContent, **kwargs) -> Content:
             data_type_ref.base)):
         raise MacroException('non-existent %s' % data_type_ref)
 
-    name, data_type = name_and_data_type
+    _, data_type = name_and_data_type
     data_type.mark_used()
-    text = '[[%s](#%s)]' % (name, data_type.anchor)
+    text = '[[%s](#%s)]' % (data_type.name_public, data_type.anchor)
 
     # XXX there might be other places where .description should be changed to
     #     .description_inherited; in this case it was needed for a data type
     #     that inherited its description from a base type
     description = data_type.description_inherited
     if arg == 'expand' and (markdown := get_markdown(
-            description.content, node=parameter, force=True, **kwargs)):
+            description.content, node=parameter.description, force=True,
+            noauto=True, **kwargs)):
         text += ' %s' % markdown
 
     return Content(text)
@@ -460,13 +479,15 @@ def expand_diffs(node, diffs, **_kwargs) -> Content:
 
     # noinspection PyListCreation
     chunks = []
+    chunks.append(OPEN_DIV)
     chunks.append('{{div|diffs|')
     chunks.append('**Changes in %s:**' % version if version else
                   '**Changes:**')
     for i, diff in enumerate(diffs):
         chunks.append('{{np}}' if i == 0 else '{{nl}}')
         chunks.append('* %s' % diff)
-    chunks.append('}}')
+    chunks.append(CLOSE_DIV)
+    chunks.append(CLOSE_DIV)
     return Content(''.join(chunks))
 
 
@@ -476,8 +497,10 @@ def expand_div(classes: str, text: str, **_kwargs) -> Union[str, Content]:
     elif not classes:
         return Content('{{np}}%s' % text)
     else:
-        return Content('{{np}}::: {%s}\n%s\n:::' % (
-            ' '.join('.%s' % cls for cls in classes.split()), text))
+        class_lst = classes.split()
+        class_str = class_lst[0] if len(class_lst) == 1 else \
+            '{%s}' % ' '.join('.%s' % cls for cls in class_lst)
+        return Content('{{np}}::: %s\n%s\n:::' % (class_str, text))
 
 
 def expand_empty(style: str, chunks, **_kwargs) -> str:
@@ -568,13 +591,21 @@ def expand_impldef(*, node, **_kwargs) -> Content:
                    maybe_empty(parameter.syntax.default.value))
 
 
+def expand_inform(node, **_kwargs) -> str:
+    parameter = cast_node(Parameter, node.parent)
+    inform = parameter.forcedInform
+    usp = parameter.model_in_path.usp
+    return '' if usp or not inform else \
+        'This parameter MUST always be included in Inform messages.'
+
+
 def expand_issue(descr_or_opts: str, descr: None, **_kwargs) -> str:
     # XXX for now, return the unaltered input
     return '{{issue|%s|%s}}' % (descr_or_opts, descr)
 
 
 # XXX this is a complex function and should be in a separate module
-def expand_keys(node, warning, info, debug, **_kwargs) -> Content:
+def expand_keys(node, warning, debug, **_kwargs) -> Content:
     # this can be used within an object that has unique keys...
     parameter = None
     if isinstance(node.parent, Object):
@@ -631,7 +662,7 @@ def expand_keys(node, warning, info, debug, **_kwargs) -> Content:
                 non_functional.append(param_ref.ref)
 
             defaulted = (param_ref_node.syntax.default.type == 'object' and
-                         param_ref_node.syntax.default.status.name !=
+                         param_ref_node.syntax.default.status.value !=
                          'deleted')
             if not defaulted:
                 non_defaulted.append(param_ref.ref)
@@ -645,7 +676,7 @@ def expand_keys(node, warning, info, debug, **_kwargs) -> Content:
 
     # XXX some warnings are suppressed if the object has been deleted; this
     #     case should be handled generally and not piecemeal
-    is_deleted = obj.status.name == 'deleted'
+    is_deleted = obj.status.value == 'deleted'
 
     # if requested, output parameter-specific info.name
     if parameter is not None:
@@ -677,7 +708,6 @@ def expand_keys(node, warning, info, debug, **_kwargs) -> Content:
     # the rest of the function applies only to objects (tables)
     undefined = []
     strong_refs = []
-    list_valued = []
     for unique_key in unique_keys:
         for param_ref in unique_key.parameters:
             param_name = param_ref.ref
@@ -689,8 +719,6 @@ def expand_keys(node, warning, info, debug, **_kwargs) -> Content:
                         isinstance(reference, PathRef) and \
                         reference.refType == 'strong':
                     strong_refs.append(param_name)
-                if param_ref_node.syntax.list:
-                    list_valued.append(param_name)
 
     if undefined and not is_deleted:
         plural = 's' if len(undefined) > 1 else ''
@@ -703,14 +731,6 @@ def expand_keys(node, warning, info, debug, **_kwargs) -> Content:
         plural = 's' if len(strong_refs) > 1 else ''
         debug('strong-reference unique key parameter%s %s' % (
             plural, Utility.nicer_list(strong_refs)))
-
-    # warn if there is a unique key parameter that's a list (this has been
-    # banned since TR-106a7)
-    # XXX for now report at info() level because this is under discussion
-    if list_valued and not is_deleted:
-        plural = 's' if len(list_valued) > 1 else ''
-        info('list-valued unique key parameter%s %s' % (
-            plural, Utility.nicer_list(list_valued)))
 
     # if we have both unconditional and conditional keys, use separate paras
     sep_paras = len(keys[1]) > 0
@@ -808,6 +828,23 @@ def expand_listitem(kind: str, **_kwargs) -> str:
     return '%s ' % kind
 
 
+def expand_notify(node, **_kwargs) -> str:
+    parameter = cast_node(Parameter, node.parent)
+    notify = parameter.activeNotify
+    usp = parameter.model_in_path.usp
+    text = ''
+    if notify == 'forceEnabled':
+        text = '' if usp else 'Active Notification MUST always be ' \
+                              'enabled for this parameter.'
+    elif notify == 'forceDefaultEnabled':
+        text = '' if usp else 'Active Notification MUST by default be ' \
+                              'enabled for this parameter.'
+    elif notify == 'canDeny':
+        text = 'Value Change' if usp else 'Active'
+        text += ' Notification requests for this parameter MAY be denied.'
+    return text
+
+
 def expand_null(name: str, scope: str, *, node: _HasContent,
                 **_kwargs) -> Content:
     parameter = cast_node(Parameter, node.parent)
@@ -815,7 +852,7 @@ def expand_null(name: str, scope: str, *, node: _HasContent,
     # XXX name and scope aren't documented in TR-106
     target = parameter
     if name or scope:
-        target = follow_reference(parameter, name, scope=scope,
+        target = follow_reference(parameter, name, scope=ScopeEnum(scope),
                                   quiet=MACROS_PATH_QUIET)
         if not target:
             raise MacroException('non-existent %s' % name)
@@ -851,7 +888,7 @@ def expand_numentries(*, node, **_kwargs) -> Content:
         raise MacroException('not associated with a table')
 
     return Content('The number of entries in the {{object|%s}} table.' %
-                   table.object_nameonly or table.object_baseonly)
+                   table.h_nameonly or table.h_baseonly)
 
 
 def expand_paramdef(*, node, **_kwargs) -> Content:
@@ -885,7 +922,7 @@ def expand_profdesc(*, node: _HasContent, **_kwargs) -> Content:
     return Content(text)
 
 
-def expand_profile(ref: str, *, node: _HasContent, warning, **_kwargs) -> str:
+def expand_profile(ref: str, *, node: _HasContent, **_kwargs) -> str:
     # if not within a model, don't attempt to follow the reference
     if not (model := node.model_in_path):
         return "*%s*" % (ref or 'profile',)
@@ -897,7 +934,7 @@ def expand_profile(ref: str, *, node: _HasContent, warning, **_kwargs) -> str:
 
     # otherwise find the profile
     profile = find_node(Profile, *model.key, ref)
-    return "*[%s](#%s)*" % (ref, profile.anchor)
+    return "[*%s*](#%s)" % (ref, profile.anchor)
 
 
 # XXX this is a complex function and should be in a separate module
@@ -942,8 +979,8 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
         target_parents = path_ref.targetParents
         target_parents_nodes = path_ref.targetParentsNodes
         target_parent_scope = path_ref.targetParentScope
-        target_type = path_ref.targetType
-        target_data_type = path_ref.targetDataType
+        target_type = path_ref.targetType.value
+        target_data_type = path_ref.targetDataType.value
 
         # see earlier explanation of how status and scope interact
         scope = status or target_parent_scope
@@ -1032,7 +1069,7 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
             if target_parent_fixed:
                 if parameter.syntax.list:
                     text += ', or {{empty}}'
-            else:
+            elif not (path_ref.command_in_path or path_ref.event_in_path):
                 text += '. If the referenced %s is deleted, ' % target_type
                 if delete:
                     text += 'this instance MUST also be deleted (so the ' \
@@ -1115,40 +1152,58 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
 # XXX ignoring the old text can mean that something marked as changed hasn't
 #     really changed; could move the macro ref up the stack, e.g.,
 #     {{param|{{replaced|A|B}}}} -> {{replaced|{{param|A}}|{{param|B}}}},
-#     which would (currently) become {{replaced|\|param\|A\||{{param|B}}}},
+#     which would (currently) become {{replaced|\{\{param\|A\}\}|{{param|B}}}},
 #     but this is rather complicated
 # XXX should handle removed, inserted and replaced in a single function
 ignore_old_macros = {'object', 'param', 'command', 'event', 'enum', 'bibref',
                      'deprecated', 'obsoleted', 'deleted'}
 
 
-# XXX this currently always generates a span; also need div logic?
+def removed_or_inserted(what: str, text: str) -> str:
+    # clean up by removing some macro references
+    text = Macro.clean(text)
+
+    # presence/absence of newlines determines whether to use a span or a div
+    comps = text.split('\n')
+
+    # leading and trailing '\n\n' are always passed through
+    head, body, tail = '', '', ''
+    if len(comps) > 2 and not comps[0] and not comps[1]:
+        head = '\n\n'
+        comps = comps[2:]
+    if len(comps) > 2 and not comps[-2] and not comps[-1]:
+        tail = '\n\n'
+        comps = comps[:-2]
+
+    # if there are no further newlines, it's a span (or empty)
+    assert len(comps) > 0
+    if len(comps) == 1:
+        body = '[%s]{.%s}' % (comps[0], what) if comps[0] else ''
+
+    # otherwise it's a div
+    else:
+        # in this case, head and tail should be defined, but we don't check
+        head, tail = '\n\n', '\n\n'
+        body = '::: %s\n' % what + '\n'.join(comps) + '\n:::'
+
+    return head + body + tail
+
+
 def expand_removed(text: str, info, stack, **_kwargs) -> str:
     # XXX experimental (see above)
     if {ref.name for ref in stack} & ignore_old_macros:
         info('ignored removed text %r within macro argument' % text)
         return ''
-    # XXX experimental (don't show removed {{nl}} -> \|nl\|)
-    text = text.replace(r'\|nl\|', '')
-    return '[%s]{.removed}' % text if text else ''
+    return removed_or_inserted('removed', Macro.unescape(text))
 
 
-# XXX this currently always generates a span; also need div logic?
-def expand_inserted(text: str, info, stack, **_kwargs) -> str:
-    # XXX experimental (see above)
-    if {ref.name for ref in stack} & ignore_old_macros:
-        info('ignored removed text %r within macro argument' % text)
-        return ''
-    return '[%s]{.inserted}' % text if text else ''
+def expand_inserted(text: str, **_kwargs) -> str:
+    return removed_or_inserted('inserted', text)
 
 
 # XXX could this give a more explicit indication of what changed?
 def expand_replaced(old: str, new: str, info, stack, **_kwargs) -> str:
-    # XXX experimental (see above)
-    if {ref.name for ref in stack} & ignore_old_macros:
-        info('ignored removed text %r within macro argument' % old)
-        return new
-    return expand_removed(old, info, stack) + expand_inserted(new, info, stack)
+    return expand_removed(old, info, stack) + expand_inserted(new)
 
 
 def expand_secured(value, **_kwargs) -> Content:
@@ -1262,7 +1317,7 @@ def expand_union(node: _HasContent, **_kwargs) -> Content:
         # XXX should use Utility.nicer_list() but it needs to support \1 and \2
         #     (actually it would be better to use %s instead)
         object_refs = ', '.join(
-                '{{object|%s|%s}}' % (obj.object_nameonly, obj.status) for obj
+                '{{object|%s|%s}}' % (obj.h_nameonly, obj.status) for obj
                 in objects)
         text = 'This parameter discriminates between the %s union objects.' \
                % object_refs
@@ -1270,7 +1325,7 @@ def expand_union(node: _HasContent, **_kwargs) -> Content:
     # object: expect discriminator parameter
     elif isinstance(node.parent, Object):
         obj = node.parent
-        object_nameonly = obj.object_nameonly
+        object_nameonly = obj.h_nameonly
         if not (parameter_name := obj.discriminatorParameter):
             raise MacroException('only valid in discriminated objects')
         text = 'This object MUST be present if, and only if, {{param|#.%s}} ' \
@@ -1305,12 +1360,12 @@ def expand_units(*, node, **_kwargs) -> str:
 # end with the desired replacement text
 def expand_whitespace(stack, chunks, **_kwargs) -> str:
     # desired replacement text for the various whitespace macros
-    macro_text =  {'ns': ' ', 'nl': '\n', 'np': '\n\n'}
+    macro_text = {'ns': ' ', 'nl': '\n', 'np': '\n\n'}
 
     # check that the macro name is expected
     name = stack[-1].name
-    assert name in macro_text, 'invalid whitespace macro name %s (not %s)' \
-                                % (name, ', '.join(macro_text))
+    assert name in macro_text, 'invalid whitespace macro name %s (not %s)' % (
+        name, ', '.join(macro_text))
 
     # desired replacement text
     text = macro_text[name]
@@ -1404,6 +1459,7 @@ Macro('enum', value=None, param=None, scope_or_status='normal',
       macro_auto='after', macro_body=expand_value)
 Macro('pattern', value=None, param=None, scope_or_status='normal',
       macro_auto='after', macro_body=expand_value)
+Macro('access', macro_auto='after', macro_body=expand_access)
 Macro('hidden', value='{{null}}', macro_auto='after', macro_body=expand_hidden)
 Macro('secured', value='{{null}}', macro_auto='after',
       macro_body=expand_secured)
@@ -1416,6 +1472,8 @@ Macro('paramdef', macro_auto='after', macro_body=expand_paramdef)
 Macro('union', macro_auto='after', macro_body=expand_union)
 Macro('entries', macro_auto='after', macro_body=expand_entries)
 Macro('keys', macro_auto='after', macro_body=expand_keys)
+Macro('inform', macro_auto='after', macro_body=expand_inform)
+Macro('notify', macro_auto='after', macro_body=expand_notify)
 
 # this is a special case
 Macro('diffs', diffs=list, macro_body=expand_diffs)

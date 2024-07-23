@@ -23,6 +23,60 @@ It replaces an earlier [report.pl] tool.
 [python]: https://www.python.org
 [report.pl]: https://github.com/BroadbandForum/cwmp-xml-tools
 
+## 2024-07-23: v2.2.0
+
+*Tag: [v2.2.0]*
+
+* Added a `spec` attribute version check (checks that `version`
+  attributes are less than or equal to the file's `spec` attribute)
+* Added a TR-106 naming rule check, including rules for vendor extensions
+* Added a check for CWMP models that define commands or events
+* Added a table / num-entries parameter version check (they should always
+  have the same version) plus warn if non-tables have num-entries
+  parameters
+* Added checks for `Alias` parameters that aren't in tables or aren't
+  unique keys
+* Added checks for list-valued defaults (they must be in square
+  brackets, and scalar defaults must not be in square brackets)
+* Added an "object default" validity check
+* Added a check for signed types that could be unsigned
+* Added `difflint` checks for illegally-removed model or profile items
+* Supported DT (Device Type) instances
+* Improved the `diff` transform's handling of deleted attributes and
+  elements
+* Allowed component references to inherit their version attributes,
+  which means that the version can usually be omitted
+* Added some more output formats, e.g. a `difftext` format that outputs
+  an easily-searchable list of differences, and a `path` format that
+  outputs the path names for all objects, parameters etc.
+* Added auto-generated HTML text for `writeOnceReadOnly` and
+  `activeNotify="canDeny"` parameters
+* Fixed a command and event argument ordering bug that caused confusing
+  placement of top-level argument parameters in HTML
+* Fixed `{{datatype}}` expansion problem that could include information
+  about the parent object rather than about the data type
+* Fixed bug in the XML output format, which could wrongly omit `version`
+  attributes from generated XML
+* Added logic to the XML output format to use the latest encountered
+  DM Schema version in generated XML files
+* Fixed HTML formatting problems affecting patterns and defaults
+  containing special characters
+* Fixed dark-mode hover-link and background colors
+* Avoided some tool crashes, e.g., when an object has been defined before
+  its parent
+* Fixed the handling of the non-standard "absolute" path scope (it was
+  being ignored)
+* Improved MediaWiki markup compatibility (MediaWiki markup will continue
+  to supported, but markdown is preferred)
+* Documented the `decimal` data type (it was already supported, but the
+  documentation said "TBD")
+* Exit code is now the number of reported errors (useful in scripts)
+* Various internal improvements that are only visible to plugin authors
+  (the plugin interface has not yet been officially documented)
+* Improved the documentation on running pandoc to convert markdown to
+  HTML
+* Fixed the file name in XML Schema validation error messages
+
 ## 2024-01-18: v2.1.0
 
 *Tag: [v2.1.0]*
@@ -63,3 +117,4 @@ It replaces an earlier [report.pl] tool.
 [v2.0.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.0.0
 [v2.0.1]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.0.1
 [v2.1.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.1.0
+[v2.2.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.2.0

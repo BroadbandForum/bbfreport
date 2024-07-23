@@ -40,26 +40,22 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import re
 
-from typing import Dict, Optional, Set
+from typing import Optional
 
-from ..node import Enumeration, Root, Units
-from ..transform import Transform
-from ..utility import Utility
+from ...logging import Logging
+from ...node import Enumeration, Root, Units
+from ...transform import Transform
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class EnumTransform(Transform):
     """Enumeration value transform plugin.
     """
 
-    all_units: Dict[str, Set[str]] = {}
+    all_units: dict[str, set[str]] = {}
 
     @staticmethod
     def _visit_enumeration(node: Enumeration) -> None:

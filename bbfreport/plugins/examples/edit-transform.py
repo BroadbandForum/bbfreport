@@ -40,30 +40,25 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
-
 # note use of absolute paths; can only use relative paths for plugins that
 # live one level down the hierarchy (because of the report.py import logic)
-from bbfreport.node import ComponentRef, Import, Xml_file
-from bbfreport.transform import Transform
-from bbfreport.utility import Utility
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+from ...node import ComponentRef, Import, Xml_file
+from ...transform import Transform
 
 
 class EditTransform(Transform):
     @staticmethod
-    def _visit_comment(comment):
+    def visit_comment(comment, warning, info):
+        warning('comment %s' % comment)
+
         retain = {'tr-181-2-wifi.xml'}
         trigger = 'The undersigned members have elected to grant the ' \
                   'copyright to'
 
         file = str(comment.instance_in_path(Xml_file))
         if file in retain:
-            logger.info('retained copyright')
+            info('retained copyright')
             return
 
         lines = []
@@ -80,10 +75,12 @@ class EditTransform(Transform):
                     state = 'initial'
 
         comment.text = '\n'.join(lines)
-        logger.info('removed copyright')
+        info('removed copyright')
 
     @staticmethod
-    def _visit_import(imp):
+    def visit_import(imp, warning):
+        warning('import %s' % imp)
+
         # XXX or check whether it's the last one
         if imp.file != 'tr-106-types.xml':
             return
@@ -96,6 +93,7 @@ class EditTransform(Transform):
                 ('component', (('name', 'Root'),)))
         new = Import(parent=dm_document, data=data)
 
+        # noinspection PyUnreachableCode
         if False:
             # XXX this isn't supported; how would it update elems?
             dm_document.imports.append(new)
@@ -108,9 +106,12 @@ class EditTransform(Transform):
         logger.info('added import')
 
     @staticmethod
-    def _visit_model(model):
+    def visit_model(model, warning):
+        warning('model %s' % model)
+
         # XXX this logic only works with --thisonly
-        assert model.args.thisonly
+        if not model.args.thisonly:
+            return
 
         model.description = None
         model.objects = None
@@ -118,6 +119,7 @@ class EditTransform(Transform):
         data = (('ref', 'Root'),)
         new = ComponentRef(parent=model, data=data)
 
+        # noinspection PyUnreachableCode
         if False:
             # XXX this isn't supported; how would it update elems?
             model.components.insert(0, new)

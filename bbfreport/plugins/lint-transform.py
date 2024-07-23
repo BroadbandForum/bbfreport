@@ -1,6 +1,6 @@
 """Lint transform plugin."""
 
-# Copyright (c) 2022-2023, Broadband Forum
+# Copyright (c) 2022-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -48,15 +48,17 @@
 
 import re
 
-from typing import cast, List, Optional
+from typing import cast, Optional, Union
 
 from ..content import MacroRef
 from ..macro import Macro
-from ..node import _Base, Command, DataType, DataTypeRef, Default, Event, \
-    _HasContent, _HasDescription, _HasRefType, Object, ObjectRef, Parameter, \
-    ParameterRef, PathRef, Profile, _ProfileItem, Syntax, Template, UniqueKey
+from ..node import _Base, Command, Component, DataType, DataTypeRef, Default, \
+    _Dt_item, Enumeration, Event, _HasContent, _HasDescription, _HasRefType, \
+    Model, _ModelItem, _Object, Object, Parameter, ParameterRef, PathRef, \
+    Profile, _ProfileItem, Range, Root, _SignedNumber, Syntax, Template, \
+    UniqueKey, Xml_file
 from ..property import Null
-from ..utility import Status, Version
+from ..utility import StatusEnum, Utility, Version
 
 # expected status 'from' to 'to' version deltas
 deprecated_to_obsoleted_delta, obsoleted_to_deleted_delta = 2, 1
@@ -90,30 +92,13 @@ class VersionRange:
     __repr__ = __str__
 
 
-# factory methods that returns info() etc. functions that will call
-# logger.info(node.objpath + ': ' + msg) etc.
-# XXX note that node.objpath is not called until the function is called
-# XXX info, warning, error, debug etc. should be supplied as visit_xxx()
-#  arguments
-def report_func(node, func):
-    return lambda text: func('%s: %s' % (
-        node.fullpath(style='object+item+component+value'), text))
-
-
-error_func = lambda node, logger: report_func(node, logger.error)
-warning_func = lambda node, logger: report_func(node, logger.warning)
-info_func = lambda node, logger: report_func(node, logger.info)
-debug_func = lambda node, logger: report_func(node, logger.debug)
-
-
 # do nothing if --thisonly was specified
 def _begin_(_, args) -> bool:
     return args.thisonly
 
 
 def status_macro_helper(node: _HasDescription, macro_ref: MacroRef, *,
-                        transitions, logger) -> None:
-    warning = warning_func(node, logger)
+                        transitions, warning) -> None:
 
     # XXX it would be better to raise ValueError and let the caller report?
     transition = macro_ref.name
@@ -125,6 +110,7 @@ def status_macro_helper(node: _HasDescription, macro_ref: MacroRef, *,
         errors += 1
 
     # get the version (it should be a simple string)
+    version = None
     if not macro_ref.args[0].is_simple:
         warning("%s version %s isn't a simple string" % (
             transition, macro_ref.args[0]))
@@ -133,7 +119,6 @@ def status_macro_helper(node: _HasDescription, macro_ref: MacroRef, *,
     # parse the version (it can specify a range)
     else:
         version_spec = macro_ref.args[0].text
-        version = None
         try:
             version = VersionRange(version_spec)
         except (AttributeError, ValueError) as e:
@@ -142,11 +127,12 @@ def status_macro_helper(node: _HasDescription, macro_ref: MacroRef, *,
             errors += 1
 
     # warn if this transition is invalid
-    if Status(transition) > node.status:
+    if transition > node.status:
         warning('is %s, so {{%s}} is invalid' % (node.status, transition))
         errors += 1
 
     # if there were no errors, update the transitions argument
+    # XXX version could be None here; is this OK?
     if errors == 0 and transitions is not None:
         transitions[transition] = version
 
@@ -155,19 +141,101 @@ def status_macro_helper(node: _HasDescription, macro_ref: MacroRef, *,
         warning('no reason for deprecation is given')
 
 
-def visit__base(node: _Base, logger):
-    warning = warning_func(node, logger)
-    info = info_func(node, logger)
+# TR-106 3.3 (Vendor-Specific Elements) and C.3.1 (Data Model Item Names)
+# checks
+# XXX should also apply these checks to enumeration values
+def name_check_helper(node: Union[DataType, Component, Enumeration,
+                                  _ModelItem], error, warning, *,
+                      name_attr: str = 'name',
+                      no_check_underscore: bool = False) -> None:
+    # 3.3: the name of a vendor-specific parameter, object, command,
+    # or event that is not contained within another vendor-specific object
+    # MUST have the form: X_<VENDOR>_VendorSpecificName
+    vendor_pattern = re.compile(r'''
+        ^
+        (?P<prefix>                             # prefix
+            X_                                  # - initial
+            (?:
+                [0-9A-F]{6}                     # - upper-case OUI
+            |                                   #   or
+                [A-Za-z0-9]+(-[A-Za-z0-9]+)+    # - domain name with '.' -> '-'
+            )
+            _                                   # - terminator
+        )
+        (?P<rest>
+            .*                                   # rest
+        )
+        $
+    ''', re.VERBOSE)
 
+    # C.3.1: all data model item names MUST start with an upper-case letter
+    # (or an underscore for an internal data type, component, model or
+    # profile)...
+    # XXX TR-106 doesn't mention that this applies to command and event names
+    # XXX TR-106 isn't clear that these rules apply after removing the prefix
+    name_pattern_initial = re.compile(r'''
+        ^
+        [A-Z_]                      # initial character
+    ''', re.VERBOSE)
+
+    # ...and MUST NOT contain hyphens or non-initial underscores
+    name_pattern_underscore = re.compile(r'''
+        ^
+        .                           # initial character (already checked)
+        [^_-]*                      # no non-initial hyphen or underscore
+        $
+    ''', re.VERBOSE)
+
+    # the dmr:noNameCheck attribute suppresses item name checks
+    if node.dmr_noNameCheck:
+        return
+
+    # reported name attr omits leading 'h_' if present
+    name_attr_reported = re.sub(r'^h_', '', name_attr)
+
+    # item name; it's modified below if it's vendor-specific
+    name = getattr(node, name_attr, None)
+    if name is None:
+        error('undefined %s attribute (perhaps the %s was never defined?)'
+              % (name_attr_reported, node.typename))
+        return
+
+    # check the vendor-specific prefix
+    if name.startswith('X_'):
+        if not (match := vendor_pattern.match(name)):
+            warning('%s has invalid vendor prefix' % name_attr_reported)
+            return
+
+        # extract the prefix and the rest of the name
+        prefix = match['prefix']
+        name = match['rest']
+
+        # check for an unnecessary prefix
+        # XXX should use a less simple-minded test
+        if prefix in node.parent.objpath:
+            warning('%s has unnecessary vendor prefix' % name_attr_reported)
+
+    # check the name (but only if the name attr is 'name' or 'h_name';
+    # enumeration values don't have to start with upper-case letters)
+    if name_attr_reported == 'name':
+        if not name_pattern_initial.match(name):
+            warning("%s doesn't start with an upper-case letter" %
+                    name_attr_reported)
+        elif not no_check_underscore and \
+                not name_pattern_underscore.match(name):
+            warning("%s contains a hyphen or underscore" % name_attr_reported)
+
+
+def visit__base(node: _Base, warning, info):
     def all_versions(nod: _Base,
-                     vers: Optional[List[Version]] = None) -> List[Version]:
+                     vers: Optional[list[Version]] = None) -> list[Version]:
         if vers is None:
             vers = []
         if nod.version is not None:
             # it might already be there, but this doesn't matter
             vers.append(nod.version)
-        if isinstance(nod.object_parent, _Base):
-            all_versions(nod.object_parent, vers)
+        if isinstance(nod.h_parent, _Base):
+            all_versions(nod.h_parent, vers)
         return vers
 
     model = node.model_in_path
@@ -185,7 +253,7 @@ def visit__base(node: _Base, logger):
 
         # XXX the earlier node.version < max(versions) check is more general
         #     than this one, so will demote this to info() pending deletion
-        parent_version = node.object_parent.object_version_inherited
+        parent_version = node.h_parent.h_version_inherited
         if parent_version and node.version < parent_version:
             info('version %s < parent version %s' % (
                 node.version, parent_version))
@@ -198,9 +266,6 @@ def visit__base(node: _Base, logger):
             if node.version == parent_version:
                 info('version %s is unnecessary' % node.version)
 
-            # mark the node so the XML format can omit the unnecessary version
-            node.xml_version = None
-
 
 # this was visit__has_status(); everything now has status
 # XXX if a node has no description element, node.description will be Null and
@@ -208,9 +273,7 @@ def visit__base(node: _Base, logger):
 #     macro-references to; maybe elements should be more like attributes, and
 #     should be instantiated on reference? or just require a description
 #     element (and sometimes allow it to be empty)
-def visit__has_description(node: _HasDescription, logger):
-    warning = warning_func(node, logger)
-
+def visit__has_description(node: _HasDescription, warning):
     ####################
     # description checks
 
@@ -230,6 +293,14 @@ def visit__has_description(node: _HasDescription, logger):
     model_version = node.model_in_path.model_version if \
         node.model_in_path else None
 
+    # some vendor models use versions such as to 2.1601 to indicate that
+    # they're derived from 2.16, so convert such versions to the original
+    # for the checks below
+    if model_version is not None:
+        major, minor, *patch = model_version.comps
+        if minor >= 1000:
+            model_version = Version((major, minor // 100, *patch))
+
     # allow profiles and their children not to have descriptions
     content = node.description.content
     if node.profile_in_path and not content:
@@ -240,7 +311,7 @@ def visit__has_description(node: _HasDescription, logger):
     # XXX no, here we should just collect the transitions; macro-level
     #     warnings should be output by macro expansion
     transitions = {}
-    for status in Status.names:
+    for status in StatusEnum.values:
         if status in content.macro_refs:
             macro_refs = content.macro_refs[status]
             if (num_macro_refs := len(macro_refs)) > 1:
@@ -248,13 +319,13 @@ def visit__has_description(node: _HasDescription, logger):
                     num_macro_refs, status))
             else:
                 status_macro_helper(node, macro_refs[0],
-                                    transitions=transitions, logger=logger)
+                                    transitions=transitions, warning=warning)
 
     # check that the appropriate status macro reference is present (we only
     # require the current status's macro, e.g., we wouldn't require
     # {{deprecated}} for an obsoleted node; also, profiles are exempt)
-    if not node.profile_in_path and node.status.name != Status.default and \
-            node.status.name not in transitions:
+    if not node.profile_in_path and node.status.value != StatusEnum.default \
+            and node.status.value not in transitions:
         warning('is %s but has no {{%s}} macro' % (
             node.status, node.status))
 
@@ -283,13 +354,14 @@ def visit__has_description(node: _HasDescription, logger):
             pass
 
         # check for a too-early transition
-        elif node.status.name == to_status and model_version < expected_ver:
+        elif node.status.value == to_status and model_version < expected_ver:
             warning("was %s at %s and shouldn't be %s until %s" % (
                  from_status, from_ver_first, to_status, expected_ver))
             warnings += 1
 
         # check for a late (overdue) transition
-        elif node.status.name == from_status and model_version >= expected_ver:
+        elif node.status.value == from_status and \
+                model_version >= expected_ver:
             be = 'have been' if expected_ver < model_version else 'be'
             warning("was %s at %s and should %s %s at %s" % (
                  from_status, from_ver_first, be, to_status, expected_ver))
@@ -297,30 +369,26 @@ def visit__has_description(node: _HasDescription, logger):
 
     # check for newly-added nodes that have already been deprecated
     if model_version is not None and node.version_inherited >= \
-            model_version and node.status > Status():
+            model_version and node.status > StatusEnum.default:
         warning("is new (added in %s) so it shouldn't be %s" % (
             node.version_inherited, node.status))
 
 
 # XXX this check would be better on Parameter?
-def visit__has_ref_type(has_ref_type: _HasRefType, logger):
+def visit__has_ref_type(has_ref_type: _HasRefType, warning):
     node = cast(_Base, has_ref_type)  # _HasRefType is a mixin class
     if has_ref_type.refType == 'weak' and not node.command_in_path and not \
             node.event_in_path and node.parameter_in_path.access == 'readOnly':
-        logger.warning('weak reference parameter is not writable')
+        warning('weak reference parameter is not writable')
 
 
 # note that we can assume that visit__has_status() has been called before this
 # is called, e.g., for a parameter (which 'has status') visit_has_status() will
 # be called and then its children will be visited, one of which is its
 # description (which 'has content')
-def visit__has_content(node: _HasContent, args, logger):
+def visit__has_content(node: _HasContent, args, error, warning, info, debug):
     if (args.all or node.is_used is not False) \
             and node.content.markdown is None:
-        error = error_func(node, logger)
-        warning = warning_func(node, logger)
-        info = info_func(node, logger)
-        debug = debug_func(node, logger)
         # XXX it's possible that the content was already expanded; see
         #     macros.expand_value()
         # XXX this can be a problem for {{template}}, which may contain
@@ -334,8 +402,25 @@ def visit__has_content(node: _HasContent, args, logger):
                     info=info, debug=debug)
 
 
-def visit_data_type(data_type: DataType, logger):
-    warning = warning_func(data_type, logger)
+def visit_data_type(data_type: DataType, error, warning):
+    # name checks are only done for non-primitive named data types
+    if data_type.name is not None and \
+            data_type.name not in data_type.primitive_types:
+        # some data type names include underscores
+        name_check_helper(data_type, error, warning, no_check_underscore=True)
+
+    # check for signed types that could be unsigned
+    if data_type.name is not None and isinstance(data_type.primitive_inherited,
+                                                 _SignedNumber) and (
+            ranges := data_type.ranges_inherited):
+        # .ranges_inherited can also return DecimalRange instances
+        if all(isinstance(rng, Range) for rng in ranges):
+            # this cleans overlapping ranges and sorts the ranges
+            clean_ranges = cast(list[Range], Range.prange_clean(ranges))
+            minval = clean_ranges[0].minInclusive
+            if minval is not None and minval >= 0:
+                warning('minimum value is %d, so it could be unsigned' %
+                        minval)
 
     # check for missing {{units}} macros, which are only required on base types
     if (units := data_type.units_inherited) and not data_type.baseNode:
@@ -346,21 +431,48 @@ def visit_data_type(data_type: DataType, logger):
             warning('units %s but no {{units}} macro' % units.value)
 
 
-def visit_object(obj: Object, logger) -> None:
-    warning = warning_func(obj, logger)
+def visit_component(component: Component, error, warning) -> None:
+    name_check_helper(component, error, warning)
 
+
+# this is currently only called for DM models
+def visit_model(model: Model, error) -> None:
+    # first check the XML file name
+    # noinspection PyTypeChecker
+    xml_file = model.instance_in_path(
+            Xml_file, predicate=lambda n: isinstance(n.parent, Root))
+    cwmp_file = str(xml_file).endswith('-cwmp')
+
+    # next check for commands and events
+    commands_and_events = model.findall(Command) + model.findall(Event)
+
+    # CWMP file with commands and events is an error
+    if cwmp_file and commands_and_events:
+        error('CWMP model defines commands and/or events %s' %
+              Utility.nicer_list([n.objpath for n in commands_and_events]))
+
+
+def visit__model_item(node: _ModelItem, error, warning) -> None:
+    # for objects, only check the final name component
+    name_attr = 'h_name' if isinstance(node, _Object) else 'name'
+    # some profile names include underscores
+    no_check_underscore = isinstance(node, Profile)
+    name_check_helper(node, error, warning, name_attr=name_attr,
+                      no_check_underscore=no_check_underscore)
+
+
+def visit_object(obj: Object, warning) -> None:
     # determine whether this is a USP model
     usp = obj.model_in_path.usp
     ignore_enable_parameter = usp
 
     # don't check anything for deleted objects
-    if obj.status.name == 'deleted':
+    if obj.status.value == 'deleted':
         return
 
     # various object attributes
-    # XXX need to add DT support
-    is_dt, is_writable, is_multi, is_fixed, is_union = \
-        False, obj.is_writable, obj.is_multi, obj.is_fixed, obj.is_union
+    is_writable, is_multi, is_fixed, is_union = \
+        obj.is_writable, obj.is_multi, obj.is_fixed, obj.is_union
 
     # find the containing command or event (if any)
     command_or_event = obj.command_in_path or obj.event_in_path
@@ -375,31 +487,31 @@ def visit_object(obj: Object, logger) -> None:
     if is_multi and not obj.objpath.endswith('.{i}.'):
         warning('object is a table but name doesn\'t end with ".{i}."')
 
-    if not is_dt and not is_multi and obj.objpath.endswith('.{i}.'):
-        warning('object is not a table but name ends with ".{i}.')
+    if not is_multi and obj.objpath.endswith('.{i}.'):
+        warning('object is not a table but name ends with ".{i}."')
 
     if not is_multi and obj.uniqueKeys:
         warning('object is not a table but has a unique key')
 
-    if not is_dt and not (is_writable and is_multi) and obj.enableParameter:
+    if not (is_writable and is_multi) and obj.enableParameter:
         warning('object is not writable and multi-instance but has '
                 'enableParameter')
 
     if obj.enableParameter and not obj.enableParameterNode:
         warning("enableParameter %s doesn't exist" % obj.enableParameter)
 
-    # numEntries parameter checks
-    # XXX report.pl logic included 'hidden' (hidden node, not syntax/@hidden)
-    #     and has a 'questionable use of "hidden" (TR-196?)' comment
-    # XXX report.pl has a --nowarnnumentries command-line option
-    if not is_dt and is_multi and not is_fixed and not command_or_event and \
-            not (obj.numEntriesParameter and obj.numEntriesParameterNode):
-        warning('missing or invalid numEntriesParameter %s' %
-                (obj.numEntriesParameter or '',))
-
-    if obj.numEntriesParameterNode:
-        num_entries_parameter = obj.numEntriesParameterNode
-        name_or_base = obj.object_name or obj.object_base
+    # numEntries parameter checks:
+    if not obj.numEntriesParameter:
+        if is_multi and not is_fixed and not command_or_event:
+            warning('missing numEntriesParameter')
+    elif not is_multi:
+        warning('object is not multi-instance but has numEntriesParameter '
+                '%s' % obj.numEntriesParameter)
+    elif not (num_entries_parameter := obj.numEntriesParameterNode):
+        warning('non-existent numEntriesParameter %s' %
+                obj.numEntriesParameter)
+    else:
+        name_or_base = obj.h_name or obj.h_base
         expected = name_or_base.replace('.{i}.', '') + 'NumberOfEntries'
         if num_entries_parameter.name != expected and not \
                 num_entries_parameter.dmr_customNumEntriesParameter:
@@ -409,6 +521,12 @@ def visit_object(obj: Object, logger) -> None:
         if num_entries_parameter.is_writable:
             warning('numEntriesParameter %s is writable' %
                     num_entries_parameter.name)
+
+        if num_entries_parameter.version_inherited != \
+                obj.version_inherited:
+            warning('version is %s but %s version is %s' %
+                    (obj.version_inherited, num_entries_parameter.name,
+                     num_entries_parameter.version_inherited))
 
         if num_entries_parameter.syntax.default:
             warning('numEntriesParameter %s has a default' %
@@ -451,6 +569,10 @@ def visit_object(obj: Object, logger) -> None:
         if not is_multi:
             warning('object is not a table but has unique keys')
 
+        if obj.dmr_noUniqueKeys:
+            warning('object has unique keys, so dmr:noUniqueKeys is '
+                    'inappropriate')
+
         any_functional, any_writable = False, False
         for unique_key in obj.uniqueKeys:
             unique_key = cast(UniqueKey, unique_key)
@@ -477,16 +599,30 @@ def visit_object(obj: Object, logger) -> None:
             warning('writable table has no enable parameter')
 
     # mount type object checks
-    if obj.mountType in {'none', 'mountable'}:
+    if obj.mountType and obj.mountType.value in {'none', 'mountable'}:
         warning('deprecated mount type %s' % obj.mountType)
 
 
-def visit_parameter(param: Parameter, logger) -> None:
-    warning = warning_func(param, logger)
+def visit__dt_item(item: _Dt_item, error):
+    if item.refNode is Null:
+        error("doesn't exist and will be ignored")
+        item.mark_unused()
+
+
+def visit_parameter(param: Parameter, warning) -> None:
     syntax = param.syntax
 
     # XXX report.pl has a 'writable parameter in read-only table' warning, but
     #     this isn't necessarily a problem and is output at level 2
+
+    # don't warn about Alias parameters if they're deprecated
+    if param.status.value == StatusEnum.default and \
+            param.name == 'Alias' and isinstance(param.parent, _Object):
+        obj = cast(Object, param.parent)
+        if not obj.is_multi:
+            warning('Alias parameter in single-instance object')
+        elif not param.uniqueKeyNodes:
+            warning('Alias parameter is not a unique key')
 
     if not syntax.type:
         warning('untyped parameter')
@@ -510,15 +646,32 @@ def visit_parameter(param: Parameter, logger) -> None:
     if syntax.reference and syntax.string.enumerations:
         warning('%s has enumerated values' % syntax.reference.typename)
 
+    # check for signed types that could be unsigned (but only for parameters
+    # added in the current model version)
+    if param.version_inherited < param.model_in_path.model_version:
+        pass
+    elif not isinstance(syntax.type, _SignedNumber):
+        pass
+    elif ranges := syntax.ranges_inherited:
+        # .ranges_inherited can also return DecimalRange instances
+        if all(isinstance(rng, Range) for rng in ranges):
+            # this cleans overlapping ranges and sorts the ranges
+            clean_ranges = cast(list[Range], Range.prange_clean(ranges))
+            minval = clean_ranges[0].minInclusive
+            if minval is not None and minval >= 0:
+                warning('minimum value is %d, so it could be unsigned' %
+                        minval)
+
+
+def visit_enumeration(enumeration: Enumeration, error, warning):
+    name_check_helper(enumeration, error, warning, name_attr='value')
+
 
 # XXX doesn't complain about defaults in read-only objects or tables; this is
 #     because they are quietly ignored (this is part of allowing them in
 #     components that can be included in multiple environments)
 # XXX the above comment was from report.pl; could we now check such things?
-def visit_default(node: Default, logger):
-    info = info_func(node, logger)
-    warning = warning_func(node, logger)
-    debug = debug_func(node, logger)
+def visit_default(node: Default, warning, info, debug):
     syntax = cast(Syntax, node.parent)
     param = cast(Parameter, syntax.parent)
 
@@ -534,51 +687,66 @@ def visit_default(node: Default, logger):
 
     # XXX should check that syntax.type is defined; if the XML is invalid, it
     #     might not be
+    debug('%s : %s : %s default %r' % (syntax, syntax.format(human=True),
+                                       node.type, node.value))
+
+    # list-valued parameters' defaults must be in '[]' brackets, and non
+    # list-valued parameters' defaults shouldn't be in '[]' brackets
+    # XXX a string parameter should be able to have a default of '[value]';
+    #     this can be added as an exception later on if need be
+    value = node.value
+    bracketed = re.match(r'^\s*\[\s*(.*?)\s*]\s*$', value)
+    if bool(bracketed) != bool(syntax.list):
+        extra = "lists must be bracketed" if syntax.list else \
+            "scalars mustn't be bracketed"
+        warning('invalid %s default %s (%s)' % (
+            node.type, Utility.nice_string(value), extra))
+
+    # if bracketed, discard the brackets
+    if bracketed:
+        value = bracketed[1]
 
     # list-valued parameters have comma-separated list defaults
     # XXX maybe should allow the list to be in '[]' brackets?
     # XXX may need to strip quotes from string values?
     if not syntax.list:
-        values = [node.value]
-    elif node.value == '':
+        values = [value]
+    elif value == '':
         values = []
     else:
         # as specified in TR-106 Section 3.2.2, ignore whitespace before and
-        # after commas, and also allow the value to be in square brackets,
-        # e.g. '[ a , b ]' becomes ['a', 'b']
-        value = re.sub(r'^\s*\[?\s*(.*?)\s*]?\s*$', r'\1', node.value)
+        # after commas
         values = re.split(r'\s*,\s*', value)
 
     # each value has to be valid for its data type
-    debug('%s : %s : %s default %r' % (syntax, syntax.format(human=True),
-                                       node.type, node.value))
     for value in values:
         errors = []
         if not syntax.type.is_valid_value(value, errors=errors):
             # XXX it would be nice to indicate this in reports; how?
             warning('invalid %s default %s (%s)' % (
-                node.type, value or r'<Empty>', ', '.join(errors)))
+                node.type, Utility.nice_string(value), ', '.join(errors)))
         elif re.search(r'<Empty>', value, re.IGNORECASE):
             warning('inappropriate %s default %s (should be an empty string)'
-                    % (node.type, value))
+                    % (node.type, Utility.nice_string(value)))
 
-        # XXX need to add 'is dynamic' logic, and review use of 'static'
-        is_dynamic = False
-        if is_dynamic and node.type == 'object':
+    if node.type == 'object':
+        # noinspection PyTypeChecker
+        multi_ancestor = node.instance_in_path(_Object,
+                                               lambda obj: obj.is_multi,
+                                               hierarchical=True)
+        if not multi_ancestor:
             warning('parameter within static object has an object default')
+        elif multi_ancestor.access == 'readOnly':
+            warning('parameter within read-only object has an object default')
 
 
-def visit_enumeration_ref(enum_ref, logger):
-    warning = warning_func(enum_ref, logger)
-
+def visit_enumeration_ref(enum_ref, warning):
     # XXX need to improve the wording
     if not enum_ref.targetParamNode:
         warning('enumeration ref -> non-existent %r' % enum_ref.targetParam)
 
 
-def visit_path_ref(path_ref: PathRef, logger) -> None:
-    warning = warning_func(path_ref, logger)
-
+def visit_path_ref(path_ref: PathRef, warning) -> None:
     # XXX need to improve the wording
     if path_ref.targetParents and not path_ref.targetParentsNode:
         # XXX for now (pending a better solution) suppress the message if
@@ -590,9 +758,7 @@ def visit_path_ref(path_ref: PathRef, logger) -> None:
                     ', '.join(path_ref.targetParents))
 
 
-def visit_profile(profile: Profile, logger) -> None:
-    warning = warning_func(profile, logger)
-
+def visit_profile(profile: Profile, warning) -> None:
     # check that the base profile exists
     if profile.base and not profile.baseNode:
         warning("profile base %s doesn't exist" % profile.base)
@@ -635,21 +801,10 @@ def visit_profile(profile: Profile, logger) -> None:
 
         # this is needed because .status_inherited inherits from the profile
         # XXX this probably doesn't cover all cases
-        def item_status(item_: _ProfileItem) -> Status:
+        def item_status(item_: _ProfileItem) -> StatusEnum:
             return min(item_.status, item_.status_inherited)
 
         # XXX should use a Requirement class that supports comparison
-        def reduced_requirement(old_req: Optional[str],
-                                new_req: Optional[str]) -> bool:
-            # note that command and event arguments have 'None' requirements
-            req_map = {None: 0, 'notSpecified': 1, 'present': 2, 'readOnly': 2,
-                       'writeOnceReadOnly': 3, 'create': 4, 'delete': 5,
-                       'createDelete': 6, 'readWrite': 6}
-            assert old_req in req_map and new_req in req_map, \
-                '%s and/or %s not in %s' % (
-                    old_req, new_req, list(req_map.keys()))
-            return req_map[new_req] < req_map[old_req]
-
         # report missing and/or invalid items
         for base_item in base_items:
             # ignore non-existent referenced nodes
@@ -671,18 +826,14 @@ def visit_profile(profile: Profile, logger) -> None:
                     base_item.requirement else ''
                 warning('needs to reference %s%s' % (ref_node.objpath, extra))
 
-            # only ObjectRef and ParameterRef have requirements
-            elif not isinstance(item, (ObjectRef, ParameterRef)):
-                pass
-
             # check that the requirement hasn't been reduced
-            elif reduced_requirement(base_item.requirement, item.requirement):
+            elif base_item.requirement and item.requirement and \
+                    item.requirement < base_item.requirement:
                 warning('has reduced requirement (%s) for %s (%s)' % (
                     item.requirement, ref_node.objpath, base_item.requirement))
 
 
-def visit__profile_item(item: _ProfileItem, logger) -> None:
-    warning = warning_func(item, logger)
+def visit__profile_item(item: _ProfileItem, warning) -> None:
     profile = item.profile_in_path
 
     # XXX ParameterRef is a profile item but is also used in unique keys, so
@@ -690,38 +841,28 @@ def visit__profile_item(item: _ProfileItem, logger) -> None:
     if not profile:
         return
 
-    # status defaults to 'current'; this tests for an explicit value
-    item_status = item.status if item.status.defined \
-        else item.status_inherited
-    # XXX or perhaps we shouldn't test for an explicit value; see DMR-288,
-    #     which might result in enabling this commented-out logic
-    # item_status = item.status
-
     # check whether the item references a non-existent node
     if not (ref_node := item.refNode):
         warning("%s doesn't exist" % item.typename)
+        return
 
-    else:
-        # check for mismatch between item access and referenced node access
-        # (it's OK for the profile item to have a 'lower access')
-        # XXX access and requirement should have ordered classes, like Status
-        # XXX access and requirement vary item and ref_node types, so the
-        #     logic must be in the classes
-        # XXX difflint should also check for valid access and requirement
-        #     transitions
-        # XXX this currently assumes ParameterRef / Parameter
-        item_requirement = getattr(item, 'requirement', 'unknown')
-        ref_access = getattr(ref_node, 'access', 'readOnly')
-        access_levels = {'readOnly': 0, 'writeOnceReadOnly': 1, 'readWrite': 2}
-        if access_levels.get(item_requirement, -1) > \
-                access_levels.get(ref_access, -1):
-            warning('requirement %s exceeds %s' % (
-                item_requirement, ref_access))
+    # check for mismatch between item access and referenced node access
+    # (it's OK for the profile item to have a 'lower access')
+    # (some node types have access == None or requirement == None)
+    # XXX difflint should also check for valid access and requirement
+    #     transitions
+    if item.requirement and ref_node.access and \
+            item.requirement > ref_node.access:
+        warning('requirement %s exceeds %s' % (
+            item.requirement, ref_node.access))
 
-        # check for mismatch between item status and referenced node status
-        # (it's OK for the profile item to be 'more deprecated')
-        # XXX should move the item_status definition here
-        ref_status = ref_node.status_inherited
-        if item_status < ref_status:
-            warning('status is %s but should be %s' % (
-                item_status, ref_status))
+    # check for mismatch between item status and referenced node status
+    # (it's OK for the profile item to be 'more deprecated')
+    # XXX arguably .status_inherited should include the .defined check
+    item_status = item.status if item.status.defined \
+        else item.status_inherited
+    ref_status = ref_node.status if ref_node.status.defined \
+        else ref_node.status_inherited
+    if item_status < ref_status:
+        warning('status is %s but should be %s' % (
+            item_status, ref_status))

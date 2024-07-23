@@ -40,19 +40,15 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import re
 
 from typing import Any
 
-from bbfreport.node import Parameter
-from bbfreport.transform import Transform
-from bbfreport.utility import Utility
+from ...logging import Logging
+from ...node import Parameter
+from ...transform import Transform
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class CandenyTransform(Transform):

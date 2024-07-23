@@ -1,3 +1,4 @@
+# noinspection GrazieInspection
 """Node classes.
 
 Every XML element becomes a node in a tree whose structure more-or-less
@@ -121,42 +122,44 @@ Glossary
 import argparse
 import builtins
 import keyword
-import logging
 import os
 import re
 
 from functools import cache
-from typing import Any, Callable, cast, Dict, List as ListType, Optional, \
-    Tuple, Type, Union
+from typing import Any, Callable, cast, Optional, Union
 
 from .content import Content
+from .exception import NodeException
 from .file import File
+from .logging import Logging
 from .parser import Data
 from .path import Path, follow_reference
 from .property import Attr, Attrs, BoolAttr, ContentAttr, DecimalAttr, \
-    DescriptionSingleElem, Elem, Elems, EnumStrAttr, FileNameStrAttr, \
+    DescriptionSingleElem, Elem, Elems, EnumObjAttr, FileNameStrAttr, \
     IntAttr, IntOrUnboundedAttr, NamespaceStrAttr, NamespaceStrDictAttr, \
     PropDescr, ListElem, Null, NullType, Property, Report, \
-    RedefineCheckStrAttr, SingleElem, SpecStrAttr, StatusEnumStrAttr, \
-    StrAttr, StrListAttr, VersionStrAttr, SyntaxSingleElem, ValueListElem
-from .utility import FileName, Spec, Status, Utility, Version
+    RedefineCheckStrAttr, SingleElem, SpecStrAttr, StrAttr, StrListAttr, \
+    VersionStrAttr, SyntaxSingleElem, ValueListElem
+from .utility import ActionEnum, ActiveNotifyEnum, Dt_activeNotifyEnum, \
+    DefaultTypeEnum, FacetAccessEnum, FileName, MountTypeEnum, \
+    NestedBracketsEnum, ObjectAccessEnum, Dt_objectAccessEnum, \
+    ObjectRequirementEnum, ParameterAccessEnum, ParameterRequirementEnum, \
+    ReferenceTypeEnum, ScopeEnum, Spec, StatusEnum, TargetDataTypeEnum, \
+    TargetTypeEnum, Utility, Version
 
 # common type aliases
 # XXX note that Node is an alias for _Node or _Base; this is convenient
 # XXX can these now be simplified, e.g., using _Mergeable?
-Key = Union[None, str, Tuple[str, ...]]
+Key = Union[None, str, tuple[str, ...]]
 Node = Union['_Node', '_Base']
 NodeOrMixin = Union[Node, '_Mixin']
-NodeType = Union[Type['_Node'], Type['_Base']]
-NodeOrMixinType = Union[NodeType, Type['_Mixin']]
-Stack = Tuple[Node]
-NodeTypes = Union[NodeType, Tuple[NodeType, ...]]
-NodeTypeNames = Union[str, Tuple[str, ...]]
+NodeType = Union[type['_Node'], type['_Base']]
+NodeOrMixinType = Union[NodeType, type['_Mixin']]
+Stack = tuple[Node, ...]
+NodeTypes = Union[NodeType, tuple[NodeType, ...]]
+NodeTypeNames = Union[str, tuple[str, ...]]
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 class_hierarchy = Utility.class_hierarchy
 lower_first = Utility.lower_first
@@ -178,24 +181,25 @@ pluralize = Utility.pluralize
 #     PyCharm does); also python version (see report.py check), use of
 #     f-strings (don't?) etc.
 
-# XXX should use __slots__ to prevent inadvertent attribute creation
+# XXX really should use __slots__ to prevent inadvertent attribute creation
 
 # XXX @cache can cache partially-constructed results; need a custom caching
 #     mechanism that doesn't have this problem
-
-# XXX should use __slots__ to prevent inadvertent attribute creation
 
 # XXX should have a better way of controlling this; perhaps control it via
 #     a debug flag? what would be its relationship with debug logging?
 PATH_QUIET = True
 
 
-def typename(cls: NodeOrMixinType) -> str:
+def typename(cls: NodeOrMixinType, *, lower: bool = False) -> str:
     name = cls.__name__
     if name.startswith('_'):
-        return '_' + lower_first(name[1:])
+        name = '_' + lower_first(name[1:])
     else:
-        return lower_first(name)
+        name = lower_first(name)
+    if lower:
+        name = name.lower()
+    return name
 
 
 def varname(cls: NodeOrMixinType, *, safe: bool = False) -> str:
@@ -286,7 +290,7 @@ class _Node(_Mergeable):
     """
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """Calculate the key for an existing or new node.
 
         Keys are tuples (typically of strings) but as a convenience they can
@@ -458,6 +462,10 @@ class _Node(_Mergeable):
         # XXX is this necessary when using --thisonly?
         if self._defermerge:
             self._defermerge = False
+            extra = ' (in %s)' % xml_file.relpath if (
+                xml_file := self.instance_in_path(Xml_file)) else ''
+            logger.info('%s:merging deferred %s data%s' % (
+                self.nicepath, self.varname, extra))
             self._merge(data=self._data, stack=self._stack, **kwargs)
             self._data = None
             # XXX this can indicate an error, e.g., tr-181-2-stomp.xml defined
@@ -465,9 +473,7 @@ class _Node(_Mergeable):
             #     hard to distinguish the expected and error cases
             # XXX we're now reporting the full path of the containing file;
             #     should replace this with the basename? (want a method)
-            extra = ' (in %s)' % xml_file.relpath if (
-                xml_file := self.instance_in_path(Xml_file)) else ''
-            logger.info('%s:merged deferred %s data%s' % (
+            logger.info('%s:merged  deferred %s data%s' % (
                 self.nicepath, self.varname, extra))
         # returned value is the final property value
         value = None
@@ -491,14 +497,18 @@ class _Node(_Mergeable):
             # if the property is still undefined, most likely there's no
             # descriptor with this name (programming error?)
             if prop is None:
-                logger.error('%s.%s: invalid or not supported' % (
-                    self.nicepath, field_name))
+                nicepath = ('%s.%s' % (self.nicepath, field_name)).replace(
+                        '..', '.')
+                logger.error('%s: invalid or not supported' % nicepath)
                 self.getprop(field_name)
                 continue
 
             # Attr values are used literally
             if isinstance(prop, Attr):
                 value = field_value
+                if report and field_name not in {'atom'}:
+                    logger.info('%s: merge %s(%s)' % (
+                        report, field_name, nice_string(value)))
 
             # Elem values populate Node objects
             else:
@@ -514,8 +524,9 @@ class _Node(_Mergeable):
                 if isinstance(attr_class, str):
                     attr_class = _Node.typenamed(attr_class)
                 if attr_class is None:
-                    logger.error('%s.%s: invalid or not supported' % (
-                        self.nicepath, field_name))
+                    nicepath = ('%s.%s' % (self.nicepath, field_name)).replace(
+                            '..', '.')
+                    logger.error('%s: invalid or not supported' % nicepath)
                     continue
 
                 # XXX attr_class should always be a 'most-derived' child
@@ -587,7 +598,7 @@ class _Node(_Mergeable):
         text = super().format(**kwargs)
         return self.keylast or text
 
-    def __str__(self):
+    def __str__(self) -> str:
         """A string representation of this node.
 
         The default implementation returns `self.format()`, which will be
@@ -595,7 +606,7 @@ class _Node(_Mergeable):
         """
         return self.format()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return '%s(%s)' % (type(self).__name__, nice_string(str(self)))
 
     # if you know the property name a priori, you can do something like
@@ -653,7 +664,7 @@ class _Node(_Mergeable):
                 * ``+model`` includes the model name at the start of the path
                 * ``+value`` includes enumeration and pattern values at the
                   end of the path
-                * ``notprofile`` omit the profile name
+                * ``+notprofile`` omit the profile name
 
             level: The current recursion depth. This is only used for
                 comparing with ``maxlevel`` and shouldn't be set by the caller.
@@ -703,18 +714,18 @@ class _Node(_Mergeable):
         # overrides
         if style_ == 'nice':
             if not value or not isinstance(self, (
-                    AbbreviationsItem, Command, CommandRef, Component,
-                    ComponentRef, DataType, Dm_document, Enumeration, Event,
-                    EventRef, GlossaryItem, Import, Input, InputRef, Model,
-                    Object, ObjectRef, Output, OutputRef, Parameter,
+                    AbbreviationsItem, _Command, CommandRef, Component,
+                    ComponentRef, DataType, _Document, Enumeration, _Event,
+                    EventRef, GlossaryItem, Import, _Input, InputRef, _Model,
+                    _Object, ObjectRef, _Output, OutputRef, _Parameter,
                     ParameterRef, Pattern, Profile, Reference, Template,
                     Xml_file)):
                 value = name
-            if isinstance(self, (Xml_file, Dm_document, Model, Profile)):
+            if isinstance(self, (Xml_file, _Document, _Model, Profile)):
                 done = True
-            if isinstance(self, (Object, ObjectRef)) and not isinstance(
+            if isinstance(self, (_Object, ObjectRef)) and not isinstance(
                     self.parent,
-                    (Input, InputRef, Output, OutputRef, Event, EventRef)):
+                    (_Input, InputRef, _Output, OutputRef, _Event, EventRef)):
                 done = True
             name = ''
             compsep = ''
@@ -723,19 +734,19 @@ class _Node(_Mergeable):
                 term = '.'
 
         elif style_ == 'object':
-            include_types = {Command, CommandRef, Event, EventRef, Input,
-                             InputRef, Object, ObjectRef, Output, OutputRef,
-                             Parameter, ParameterRef}
+            include_types = {_Command, CommandRef, _Event, EventRef, _Input,
+                             InputRef, _Object, ObjectRef, _Output, OutputRef,
+                             _Parameter, ParameterRef}
             include_types_more = set()
             if 'file' in modifiers:
-                include_types_more |= {Dm_document}
+                include_types_more |= {_Document}
             if 'item' in modifiers:
                 include_types_more |= {AbbreviationsItem, DataType,
                                        GlossaryItem, Reference, Template}
             if 'component' in modifiers:
                 include_types_more |= {Component}
             if 'model' in modifiers:
-                include_types_more |= {Model}
+                include_types_more |= {_Model}
             if 'value' in modifiers:
                 include_types_more |= {Enumeration, Pattern}
             if 'notprofile' not in modifiers:
@@ -758,14 +769,13 @@ class _Node(_Mergeable):
             if not isinstance(self, tuple(include_types | include_types_more)):
                 value = ''
             if level == 0 and isinstance(self, (
-                    Command, CommandRef, Event, EventRef, Model)) and \
-                    value.endswith(
-                    '.'):
+                    _Command, CommandRef, _Event, EventRef, _Model)) and \
+                    value.endswith('.'):
                 value = value[:-1]
             if 'component' in modifiers and isinstance(self, Component):
                 # XXX should review how to show component names; file?
-                term = ':'
-            elif 'model' in modifiers and isinstance(self, Model) \
+                term = ''
+            elif 'model' in modifiers and isinstance(self, _Model) \
                     and level > 0:
                 term = '.'
             elif 'notprofile' not in modifiers and level > 0 and isinstance(
@@ -839,18 +849,21 @@ class _Node(_Mergeable):
         unkeyed."""
         return self._key[-1] if self._key else None
 
+    # XXX should be Null rather than None
+    # XXX needs a type declaration
     @property
     def parent(self):
         """The node's parent node, or ``None`` if it has no parent."""
         return self._parent
 
+    # XXX needs a type declaration
     @property
     def data(self):
         """The node's stored data, if any."""
         return self._data
 
     @property
-    def props(self) -> Tuple[Property, ...]:
+    def props(self) -> tuple[Property, ...]:
         """The node's properties.
 
         Returns:
@@ -864,7 +877,7 @@ class _Node(_Mergeable):
         return self._attrs.props + self._elems.props
 
     # this is populated lazily as an optimization
-    __typedict: Dict[str, NodeOrMixinType] = {}
+    __typedict: dict[str, NodeOrMixinType] = {}
 
     @classmethod
     def __init_typedict(cls) -> None:
@@ -874,12 +887,13 @@ class _Node(_Mergeable):
                         issubclass(obj, (_Node, _Mixin)):
                     obj = cast(NodeOrMixinType, obj)
                     cls.__typedict[obj.__name__] = obj
-                    cls.__typedict[typename(obj)] = obj
+                    cls.__typedict[typename(obj, lower=False)] = obj
+                    cls.__typedict[typename(obj, lower=True)] = obj
                     cls.__typedict[varname(obj, safe=False)] = obj
                     cls.__typedict[varname(obj, safe=True)] = obj
 
     @classmethod
-    def typedict(cls) -> Dict[str, NodeOrMixinType]:
+    def typedict(cls) -> dict[str, NodeOrMixinType]:
         cls.__init_typedict()
         return cls.__typedict
 
@@ -963,6 +977,8 @@ class _Node(_Mergeable):
                       r'input|output|event)Ref$', r'\1', self.typename)
         name = lower_first(re.sub(r'(abbreviations|glossary|import|'
                                   r'reference|syntax)(.+)$', r'\2', name))
+        if name.startswith('dt_') and name != 'dt_document':
+            name = name[3:]
         name = name.replace('_', ':')
         return name
 
@@ -970,7 +986,7 @@ class _Node(_Mergeable):
     #     find() below
     @classmethod
     def findall(cls, typ: Optional[Union[str, NodeType]] = None,
-                predicate: Optional[Callable] = None) -> Tuple[Node, ...]:
+                predicate: Optional[Callable] = None) -> tuple[Node, ...]:
         """Find all nodes of the specified type.
 
         This only returns keyed nodes. It can't return unkeyed nodes because
@@ -1013,6 +1029,7 @@ class _Node(_Mergeable):
 
     # XXX signature should allow node type names; define an alias?
     # XXX this should return Null rather than None on failure
+    # XXX this should be defined on _Base0
     @classmethod
     @cache
     def instance_in_stack(cls, stack: Stack,
@@ -1048,10 +1065,12 @@ class _Node(_Mergeable):
     #     moral is always to use boolean checks rather than explicit checks
     #     for None or Null?; no, because the caller needs to know whether
     #     it's safe to do self.instance_in_path(Foo).bar)
+    # XXX this should be defined on _Base0
     @cache
     def instance_in_path(self, types: Optional[Union[NodeTypeNames,
                                                      NodeTypes]] = None,
-                         predicate: Optional[Callable] = None) -> \
+                         predicate: Optional[Callable] = None, *,
+                         hierarchical: bool = False) -> \
             Union[Node, NullType]:
         """Search from the current node (``self``) to its parent and so on
         up to the `Root` node for an instance of the specified type or types.
@@ -1059,21 +1078,24 @@ class _Node(_Mergeable):
         Args:
             types: Node type names or node classes. Can be a scalar or a tuple.
             predicate: Predicate.
+            hierarchical: Whether to navigate up the object hierarchy.
 
         Returns:
             The first matching node, or ``Null`` if not found.
         """
         cls = type(self)
         types_ = cls.typestuple(types)
+        parent = lambda: self.h_parent if hierarchical else self._parent
         # noinspection PyTypeChecker
         return self if isinstance(self, types_) and (
                 predicate is None or predicate(self)) else Null if \
-            self._parent is None else \
-            self._parent.instance_in_path(types_, predicate)
+            parent() is None else \
+            parent().instance_in_path(types_, predicate,
+                                      hierarchical=hierarchical)
 
     # XXX this is experimental
     @classmethod
-    def __most_derived(cls) -> Type:
+    def __most_derived(cls) -> type:
         most = None
         subs = cls.__subclasses__()
         if not subs:
@@ -1089,7 +1111,7 @@ class _Mixin(_Mergeable):
     """Class from which all mixins are derived."""
 
 
-class _Base(_Node):
+class _Base0(_Node):
     """Class from which all node classes (other than `_Node`) are derived.
 
     This class defines some common attributes that can occur on all nodes,
@@ -1117,11 +1139,6 @@ class _Base(_Node):
     # XXX this is potentially confused with _HasContent.text
     text = atom
     """Alias of `atom`."""
-
-    status = PropDescr(StatusEnumStrAttr, default=Status, doc='Node status.')
-
-    version = PropDescr(VersionStrAttr, levels=3, doc='Node version (added '
-                                                      'in DM v1.7).')
 
     comments = PropDescr(ListElem, plural=True, doc="Comments.")
     cdatas = PropDescr(ListElem, plural=True, doc="Character data.")
@@ -1157,22 +1174,22 @@ class _Base(_Node):
         elif self.parent:
             self.parent.unhide(description=True, upwards=True)
 
-    def object_hide(self) -> None:
+    def h_hide(self) -> None:
         self.is_hidden = True
-        for elem in self.object_elems:
-            elem.object_hide()
+        for elem in self.h_elems:
+            elem.h_hide()
 
-    def object_unhide(self, *, description: bool = False,
-                      upwards: bool = False) -> None:
+    def h_unhide(self, *, description: bool = False,
+                 upwards: bool = False) -> None:
         self.is_hidden = False
         if description and hasattr(self, 'description'):
             self.description.unhide()
 
         if not upwards:
-            for elem in self.object_elems:
-                elem.object_unhide()
-        elif self.object_parent:
-            self.object_parent.object_unhide(
+            for elem in self.h_elems:
+                elem.h_unhide()
+        elif self.h_parent:
+            self.h_parent.h_unhide(
                     description=description, upwards=True)
 
     # XXX all 'global' types should call this in _mergedone(); should use the
@@ -1202,18 +1219,18 @@ class _Base(_Node):
         elif self.parent:
             self.parent.mark_used(upwards=True)
 
-    def object_mark_unused(self) -> None:
+    def h_mark_unused(self) -> None:
         self.is_used = False
-        for elem in self.object_elems:
-            elem.object_mark_unused()
+        for elem in self.h_elems:
+            elem.h_mark_unused()
 
-    def object_mark_used(self, *, upwards: bool = False) -> None:
+    def h_mark_used(self, *, upwards: bool = False) -> None:
         self.is_used = True
         if not upwards:
-            for elem in self.object_elems:
-                elem.object_mark_used()
-        elif self.object_parent:
-            self.object_parent.object_mark_used(upwards=True)
+            for elem in self.h_elems:
+                elem.h_mark_used()
+        elif self.h_parent:
+            self.h_parent.h_mark_used(upwards=True)
 
     # this searches the node's ancestors for the attribute
     @property
@@ -1229,6 +1246,96 @@ class _Base(_Node):
         """
         return self.xmlns_dmr if self.xmlns_dmr is not None else \
             self._parent.xmlns_dmr_inherited if self._parent else None
+
+    # XXX this should return Null rather than None (general point)
+    @property
+    @cache
+    def h_parent(self) -> Optional['_Base']:
+        return self._parent
+
+    @property
+    @cache
+    def h_elems(self) -> tuple[Node, ...]:
+        return self.elems
+
+    # the next four properties (attrs, attrs_props, elems and elems_props)
+    # could be defined on _Node, but are defined here so elems can be
+    # declared to return _Base instances, which means that mark_unused() and
+    # mark_used() (and any future _Base methods) are type-safe
+
+    @property
+    def attrs(self) -> dict[str, str]:
+        """The node's attributes (in the XML sense).
+
+        This only contains attributes that were explicitly defined in the
+        input file or have been subsequently created.
+
+        Returns:
+            A dictionary mapping attribute names to their string values (in
+            the order in which they were defined).
+
+        Note:
+            1. This is a snapshot, and modifying it won't modify the node.
+            2. If you need more control, you can use `attrs_props` to get the
+               underlying `Attr` objects.
+        """
+        return self._attrs.value
+
+    # XXX would this be more useful as a dictionary?
+    @property
+    def attrs_props(self) -> tuple[Attr, ...]:
+        """The node's attribute properties.
+
+        Returns:
+            A tuple of `Attr` objects (in the order in which they were
+            defined).
+
+        Note:
+            This is for more advanced applications.
+        """
+        return self._attrs.props
+
+    @property
+    def elems(self) -> tuple[Node, ...]:
+        """The node's child elements (in the XML sense). Each element is a
+        node.
+
+        This only contains elements that were explicitly defined in the
+        input file or have been subsequently created.
+
+        Returns:
+            A tuple of nodes (in the order in which they were defined).
+
+        Note:
+            1. This is a snapshot, and modifying it won't modify the node.
+            2. If you need more control, you can use `elems_props` to get the
+               underlying `Elem` objects.
+        """
+        return self._elems.value
+
+    @property
+    def elems_props(self) -> tuple[Elem, ...]:
+        """The node's element properties.
+
+        Returns:
+            A tuple of `Elem` objects (in the order in which they were
+            defined).
+
+        Note:
+            This is for more advanced applications.
+        """
+        return self._elems.props
+
+    auto_macro_criteria = {}
+
+
+# this is the base for DM documents and models, whereas DT documents and
+# models (like all other node classes) are derived from _Base0
+class _Base(_Base0):
+    status = PropDescr(EnumObjAttr, enum_cls=StatusEnum, doc='Node status.')
+
+    version = PropDescr(VersionStrAttr, levels=3, doc='Node version (added '
+                                                      'in DM v1.7).')
 
     # this searches the node's ancestors for the attribute
     @property
@@ -1247,16 +1354,10 @@ class _Base(_Node):
             self._parent.version_inherited if self._parent is not None \
             else None
 
-    # XXX this should return Null rather than None (general point)
-    @property
-    @cache
-    def object_parent(self) -> Optional['_Base']:
-        return self._parent
-
     # this searches the node's ancestors for the attribute
     @property
     @cache
-    def object_version_inherited(self) -> Optional[Version]:
+    def h_version_inherited(self) -> Optional[Version]:
         """The `version` attribute that applies to this node.
 
         The value is taken from this node or the nearest ancestor that
@@ -1268,18 +1369,15 @@ class _Base(_Node):
         """
         return self.version if self.version is not None else \
             self.dmr_version if self.dmr_version is not None else \
-            self.object_parent.object_version_inherited if \
-            self.object_parent is not None else None
+            self.h_parent.h_version_inherited if \
+                self.h_parent is not None else None
 
-    @property
-    @cache
-    def object_elems(self) -> Tuple[Node, ...]:
-        return self.elems
-
-    # XXX I have a feeling that status_inherited and object_status_inherited
+    # XXX I have a feeling that status_inherited and h_status_inherited
     #     could be simplified!
-    # can't be nested, because is referenced from object_status_inherited()
-    def status_inherited_helper(self, highest: Status) -> Status:
+    # XXX they should definitely be reviewed, and it would be good to permit
+    #     None and/or str in place of Status instances
+    # can't be nested, because is referenced from h_status_inherited()
+    def status_inherited_helper(self, highest: StatusEnum) -> StatusEnum:
         if self.status > highest:
             highest = self.status
         return self.parent.status_inherited_helper(highest) if self.parent \
@@ -1289,30 +1387,25 @@ class _Base(_Node):
     # encountered status
     @property
     @cache
-    def status_inherited(self) -> Status:
-        return self.status_inherited_helper(Status())
+    def status_inherited(self) -> StatusEnum:
+        return self.status_inherited_helper(StatusEnum())
 
-    # can't be nested, because is referenced from object_status_inherited()
-    def object_status_inherited_helper(self, highest: Status) -> Status:
+    # can't be nested, because is referenced from h_status_inherited()
+    def h_status_inherited_helper(self, highest: StatusEnum) -> StatusEnum:
         if self.status > highest:
             highest = self.status
-        object_parent = self.object_parent
-        if object_parent is None:
+        h_parent = self.h_parent
+        if h_parent is None:
             return highest
-        elif isinstance(object_parent, Object):
-            return object_parent.object_status_inherited_helper(highest)
+        elif isinstance(h_parent, Object):
+            return h_parent.h_status_inherited_helper(highest)
         else:
-            return object_parent.status_inherited_helper(highest)
+            return h_parent.status_inherited_helper(highest)
 
     @property
     @cache
-    def object_status_inherited(self) -> Status:
-        return self.object_status_inherited_helper(Status())
-
-    # the next four properties (attrs, attrs_props, elems and elems_props)
-    # could be defined on _Node, but are defined here so elems can be
-    # declared to return _Base instances, which means that mark_unused() and
-    # mark_used() (and any future _Base methods) are type-safe
+    def h_status_inherited(self) -> StatusEnum:
+        return self.h_status_inherited_helper(StatusEnum())
 
     # properties for the containing model etc.
     # XXX could add more? should add fewer?
@@ -1323,6 +1416,7 @@ class _Base(_Node):
     def model_in_path(self) -> Union['Model', NullType]:
         return self.instance_in_path(Model)
 
+    # XXX do we also need h_object_in_path?
     @property
     @cache
     def object_in_path(self) -> Union['Object', NullType]:
@@ -1347,71 +1441,6 @@ class _Base(_Node):
     @cache
     def profile_in_path(self) -> Union['Profile', NullType]:
         return self.instance_in_path(Profile)
-
-    @property
-    def attrs(self) -> Dict[str, str]:
-        """The node's attributes (in the XML sense).
-
-        This only contains attributes that were explicitly defined in the
-        input file or have been subsequently created.
-
-        Returns:
-            A dictionary mapping attribute names to their string values (in
-            the order in which they were defined).
-
-        Note:
-            1. This is a snapshot, and modifying it won't modify the node.
-            2. If you need more control, you can use `attrs_props` to get the
-               underlying `Attr` objects.
-        """
-        return self._attrs.value
-
-    # XXX would this be more useful as a dictionary?
-    @property
-    def attrs_props(self) -> Tuple[Attr, ...]:
-        """The node's attribute properties.
-
-        Returns:
-            A tuple of `Attr` objects (in the order in which they were
-            defined).
-
-        Note:
-            This is for more advanced applications.
-        """
-        return self._attrs.props
-
-    @property
-    def elems(self) -> Tuple[Node, ...]:
-        """The node's child elements (in the XML sense). Each element is a
-        node.
-
-        This only contains elements that were explicitly defined in the
-        input file or have been subsequently created.
-
-        Returns:
-            A tuple of nodes (in the order in which they were defined).
-
-        Note:
-            1. This is a snapshot, and modifying it won't modify the node.
-            2. If you need more control, you can use `elems_props` to get the
-               underlying `Elem` objects.
-        """
-        return self._elems.value
-
-    @property
-    def elems_props(self) -> Tuple[Elem, ...]:
-        """The node's element properties.
-
-        Returns:
-            A tuple of `Elem` objects (in the order in which they were
-            defined).
-
-        Note:
-            This is for more advanced applications.
-        """
-        return self._elems.props
-
-    auto_macro_criteria = {}
 
 
 class _Text(_Base):
@@ -1621,14 +1650,14 @@ class Root(_Base):
 
         # force merge of any top-level models
         if isinstance(parent, Root):
-            for model in xml_file.dm_document.models:
+            for model in xml_file.document.models:
                 model.merge(stack=stack)
 
         # return the Xml_file instance
         return xml_file
 
     @staticmethod
-    def _filter(data: Data, *, spec: Optional[ListType[str]] = None) -> Data:
+    def _filter(data: Data, *, spec: Optional[list[str]] = None) -> Data:
         # return the input if there's no spec or the data isn't a tuple
         if not spec or not isinstance(data, tuple):
             return data
@@ -1670,11 +1699,14 @@ class Xml_file(_Base):
     # XXX should provide an attribute that's just the simple filename; can
     #     use str() but it might include a partial path
     xml_decl = PropDescr(SingleElem, doc="File's XML declaration line.")
+
+    # XXX can't express that allow only one of dm_document and dt_document
     dm_document = PropDescr(SingleElem, doc="File's DM document element.")
+    dt_document = PropDescr(SingleElem, doc="File's DT document element.")
 
     # key is always the full path (realpath)
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, *,
+    def calckey(cls, parent: Node, dct: dict, *,
                 realpath: Optional[str] = None, **kwargs) -> Key:
         """The full file path ("real path")."""
         # realpath must be supplied
@@ -1685,6 +1717,10 @@ class Xml_file(_Base):
     @property
     def relpath(self) -> str:
         return os.path.relpath(self.keylast)
+
+    @property
+    def document(self) -> Union['Dm_document', 'Dt_document', NullType]:
+        return self.dm_document or self.dt_document
 
     # XXX could/should disambiguate (like Emacs) when multiple files have
     #     the same name
@@ -1704,6 +1740,7 @@ class Xml_file(_Base):
 class _HasDescription(_Base):
     """Base class for nodes that can have a `Description`.
     """
+
     description = PropDescr(DescriptionSingleElem, doc="Description.")
 
     @property
@@ -1711,11 +1748,7 @@ class _HasDescription(_Base):
         return self.description
 
 
-# noinspection PyPep8Naming
-class Dm_document(_HasDescription):
-    """A DM document.
-    """
-
+class _Document(_Mixin):
     XMLNS_DMR_ORIGINAL_URN = 'urn:broadband-forum-org:cwmp:datamodel-report' \
                              '-0-1'
     XMLNS_DMR_LATEST_URN = 'urn:broadband-forum-org:cwmp:datamodel-report-1-0'
@@ -1723,9 +1756,26 @@ class Dm_document(_HasDescription):
                                 '-datamodel-report-1-0.xsd'
 
     xmlns_dm = PropDescr(NamespaceStrAttr, doc='DM namespace.')
+
     xmlns_xsi = PropDescr(NamespaceStrAttr, doc='XML XSI namespace.')
     xsi_schemaLocation = PropDescr(NamespaceStrDictAttr,
                                    doc='XSI schema location.')
+
+    @property
+    def file_safe(self) -> FileName:
+        raise NotImplementedError
+
+    # optional additional info
+    # XXX this needs review, and perhaps extension
+    @property
+    def file_info(self) -> dict[str, Optional[str]]:
+        return {}
+
+
+# noinspection PyPep8Naming
+class Dm_document(_HasDescription, _Document):
+    """A DM document.
+    """
 
     file = PropDescr(FileNameStrAttr, mandatory=True,
                      doc='File name (added in DM v1.4)')
@@ -1749,7 +1799,7 @@ class Dm_document(_HasDescription):
 
     # key is always the full path (realpath)
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Xml_file`'s key (the full file path)."""
         xml_file = parent.instance_in_path(Xml_file)
         assert xml_file is not None and xml_file.key is not None
@@ -1780,6 +1830,8 @@ class Dm_document(_HasDescription):
             # XXX not yet implemented; will make file and spec attributes be
             #     objects with appropriate methods for accessing fields,
             #     comparing etc.; can base on file.File.__parsename().Result
+            # XXX it seems that _mergedone() now checks this; is this routine
+            #     no longer needed?
             logger.debug(f'import  {imp.file!r} {imp.spec!r} -> {file!r} '
                          f'{spec!r}')
 
@@ -1793,7 +1845,7 @@ class Dm_document(_HasDescription):
             logger.error('%s.spec: missing attribute' % self.nicepath)
 
         if self.file is not None and self.spec is not None and not \
-                self.spec.matches(self.file):
+                cast(Spec, self.spec).matches(cast(FileName, self.file)):
             logger.warning(f"{self.nicepath}: spec is {self.spec} (doesn't "
                            f"match {self.file})")
 
@@ -1831,16 +1883,7 @@ class Description(_HasContent):
     """A description element.
     """
 
-    # XXX the pyxb parser returns an object derived from str that has a
-    #     'replace' attribute that is NOT the str.replace() method,
-    #     so need to ensure that the value is explicitly converted to
-    #     str; StrAttr should include this logic
-    # XXX should define some more EnumStrAttr sub-classes, but only where
-    #     there's some relationship between the values, e.g. they're ordered
-    #     or want to use an underlying class for instances (as for Status)
-    action = PropDescr(EnumStrAttr,
-                       values=('create', 'prefix', 'append', 'replace'),
-                       default='create',
+    action = PropDescr(EnumObjAttr, enum_cls=ActionEnum,
                        doc='How to combine new content with existing content.')
 
 
@@ -1999,8 +2042,11 @@ class _Accessor(_Mixin):
     def update_entities(self, name, *, always=False):
         if always or name not in self.entities:
             entity = self.entity  # note that this uses the property accessor
-            if entity.name in self.entities:
-                del self.entities[entity.name]
+            # XXX have disabled this deletion; it (for example) deleted the
+            #     _AliasUSP entry when it was imported as Alias (surely it
+            #     does no harm to retain the original; it's needed!)
+            # if entity.name in self.entities:
+            #     del self.entities[entity.name]
             self.entities[name] = (name, entity)
 
     # XXX perhaps None shouldn't mean self? it's too dangerous a default?
@@ -2013,6 +2059,14 @@ class _Accessor(_Mixin):
 class DataTypeAccessor(_Accessor):
     """`DataType` accessor."""
     entities = {}
+
+    # maps data type names to the public names by which they were imported
+    # (primarily intended for _AliasCWMP / _AliasUSP imported as Alias)
+    @classmethod
+    def public_map(cls) -> dict[str, str]:
+        return {data_type.name: name for name, data_type in
+                cls.entities.values() if
+                not name.startswith('_') and name != data_type.name}
 
 
 class ComponentAccessor(_Accessor):
@@ -2036,7 +2090,7 @@ class _ImportEntity(_Base):
                                  'the same as the name in this file.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Dm_document` key and the `_ImportEntity.name`
         attribute."""
         assert parent.instance_in_path(Dm_document) is not None
@@ -2107,7 +2161,7 @@ class _HasValueMixin(_Mixin):
     def is_valid_value(self, value: Any, *,
                        length: Optional[int] = None,
                        nopatterncheck: bool = False,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         assert not kwargs, '%s: unsupported is_valid_value() arguments %s' % \
                            (type(self).__name__, kwargs)
@@ -2160,7 +2214,7 @@ class _HasPrimitives(_DataTypeBase):
     # XXX this was defined statically as self._primitives in _mergedone() but
     #     this creates problems on update, because only props are merged
     @property
-    def primitives(self) -> ListType['_Primitive']:
+    def primitives(self) -> list['_Primitive']:
         return [elem for elem in self.elems if isinstance(elem, _Primitive)]
 
     @property
@@ -2188,7 +2242,7 @@ class _FacetMixin(_HasValueMixin):
     @classmethod
     def is_valid_update(cls, old: 'DataType', new: 'DataType',
                         expand: bool = False,
-                        errors: Optional[ListType[str]] = None,
+                        errors: Optional[list[str]] = None,
                         **kwargs) -> bool:
         assert not kwargs, '%s: unsupported is_valid_update() arguments %s' \
                            % (cls.__name__, kwargs)
@@ -2212,13 +2266,13 @@ class _HasSizes(_FacetMixin):
     sizes = PropDescr(ListElem, plural=True, doc='Size facet.')
 
     @property
-    def sizes_inherited(self) -> ListType['Size']:
+    def sizes_inherited(self) -> list['Size']:
         return self.sizes or []
 
     @classmethod
     def is_valid_update(cls, old: 'DataType', new: 'DataType', *,
                         expand: bool = False,
-                        errors: Optional[ListType[str]] = None,
+                        errors: Optional[list[str]] = None,
                         **kwargs) -> bool:
         if not super().is_valid_update(old, new, expand=expand,
                                        errors=errors, **kwargs):
@@ -2244,7 +2298,7 @@ class _HasSizes(_FacetMixin):
 
     def is_valid_value(self, value: Any, *,
                        length: Optional[int] = None,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        nosizecheck: bool = False, **kwargs) -> bool:
         if not super().is_valid_value(value, length=length, errors=errors,
                                       **kwargs):
@@ -2313,13 +2367,13 @@ class _HasRanges(_FacetMixin):
     ranges = PropDescr(ListElem, plural=True, doc='Integer range facet.')
 
     @property
-    def ranges_inherited(self) -> ListType['Range']:
+    def ranges_inherited(self) -> list['Range']:
         return self.ranges or []
 
     @classmethod
     def is_valid_update(cls, old: 'DataType', new: 'DataType', *,
                         expand: bool = False,
-                        errors: Optional[ListType[str]] = None,
+                        errors: Optional[list[str]] = None,
                         **kwargs) -> bool:
         if not super().is_valid_update(old, new, expand=expand,
                                        errors=errors, **kwargs):
@@ -2344,7 +2398,7 @@ class _HasRanges(_FacetMixin):
         return valid
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -2389,11 +2443,11 @@ class _HasDecimalRanges(_FacetMixin):
 
     # noinspection PyPep8Naming
     @property
-    def decimalRanges_inherited(self) -> ListType['DecimalRange']:
+    def decimalRanges_inherited(self) -> list['DecimalRange']:
         return self.decimalRanges or []
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -2434,11 +2488,11 @@ class _HasDecimalRanges2(_FacetMixin):
                        node_cls='DecimalRange')
 
     @property
-    def ranges_inherited(self) -> ListType['DecimalRange']:
+    def ranges_inherited(self) -> list['DecimalRange']:
         return self.ranges or []
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -2477,13 +2531,13 @@ class _HasEnumerations(_FacetMixin):
                              doc='Enumeration facet.')
 
     @property
-    def enumerations_inherited(self) -> ListType['Enumeration']:
+    def enumerations_inherited(self) -> list['Enumeration']:
         return self.enumerations or []
 
     @classmethod
     def is_valid_update(cls, old: 'DataType', new: 'DataType', *,
                         expand: bool = False,
-                        errors: Optional[ListType[str]] = None,
+                        errors: Optional[list[str]] = None,
                         **kwargs) -> bool:
         if not super().is_valid_update(old, new, expand=expand,
                                        errors=errors, **kwargs):
@@ -2509,7 +2563,7 @@ class _HasEnumerations(_FacetMixin):
         return valid
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -2533,7 +2587,7 @@ class _HasEnumerations(_FacetMixin):
 
         # XXX this shouldn't be the default
         # noinspection PyUnreachableCode
-        enumerations = cast(ListType[Enumeration], self.enumerations)
+        enumerations = cast(list[Enumeration], self.enumerations)
         return '{%s}' % ','.join(enum.value for enum in enumerations) \
             if enumerations else ''
 
@@ -2543,8 +2597,13 @@ class _HasEnumerationRef(_FacetMixin):
 
     enumerationRef = PropDescr(SingleElem, doc='Enumeration ref facet.')
 
+    # noinspection PyPep8Naming
+    @property
+    def enumerationRef_inherited(self) -> Union['EnumerationRef', NullType]:
+        return self.enumerationRef
+
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -2574,11 +2633,11 @@ class _HasPatterns(_FacetMixin):
     patterns = PropDescr(ValueListElem, plural=True, doc='Pattern facet.')
 
     @property
-    def patterns_inherited(self) -> ListType['Pattern']:
+    def patterns_inherited(self) -> list['Pattern']:
         return self.patterns or []
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -2615,24 +2674,27 @@ class _HasFacets(_Base, _HasList, _HasSizes, _HasInstanceRef, _HasPathRef,
 
     @property
     @cache
-    def facets(self) -> Tuple['_Facet']:
+    def facets(self) -> tuple['_Facet', ...]:
         return tuple(elem for elem in self.elems if isinstance(elem, _Facet))
 
 
+# XXX there's no obvious way of checking whether a data type is primitive
+#     (have to compare its name with primitive_types?)
 class DataType(_HasPrimitives, _HasFacets, DataTypeAccessor):
     """Data type definition.
     """
+
+    dmr_noNameCheck = PropDescr(BoolAttr)
+    dmr_noUnitsTemplate = PropDescr(BoolAttr)
 
     name = PropDescr(StrAttr, mandatory=True, doc='Name of this data type.')
     base = PropDescr(StrAttr,
                      doc='Name of the data type on which this one is based.')
 
-    dmr_noUnitsTemplate = PropDescr(BoolAttr)
-
     expand = False
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Dm_document` key and the `DataType.name` attribute."""
 
         # if no name is supplied this is an anonymous (unkeyed) type
@@ -2738,6 +2800,21 @@ class DataType(_HasPrimitives, _HasFacets, DataTypeAccessor):
         if not isinstance(self, Syntax):
             self.mark_unused()
 
+    @property
+    def name_public(self) -> str:
+        """Get the public name, falling back on the data type name."""
+        return DataTypeAccessor.public_map().get(self.name, self.name)
+
+    @property
+    def base_public(self) -> str:
+        """Get the public base, falling back on the data type base."""
+        return DataTypeAccessor.public_map().get(self.base, self.base)
+
+    @property
+    def anchor(self) -> str:
+        # XXX this is a bit of a hack
+        return super().anchor.replace(self.name, self.name_public)
+
     # this allows a data type to inherit its base type's description
     @property
     def description_inherited(self) -> Union[Description, NullType]:
@@ -2765,7 +2842,7 @@ class DataType(_HasPrimitives, _HasFacets, DataTypeAccessor):
     #     undefined, whereas xxx_inherited returns []?
 
     @property
-    def sizes_inherited(self) -> ListType['Size']:
+    def sizes_inherited(self) -> list['Size']:
         return self._facet_inherited('sizes', [])
 
     # noinspection PyPep8Naming
@@ -2778,21 +2855,22 @@ class DataType(_HasPrimitives, _HasFacets, DataTypeAccessor):
     def pathRef_inherited(self) -> Union['PathRef', NullType]:
         return self._facet_inherited('pathRef', Null)
 
+    # XXX this can actually return both Range and DecimalRange objects
     @property
-    def ranges_inherited(self) -> ListType['Range']:
+    def ranges_inherited(self) -> list['Range']:
         return self._facet_inherited('ranges', [])
 
     # noinspection PyPep8Naming
     @property
-    def decimalRanges_inherited(self) -> ListType['DecimalRange']:
+    def decimalRanges_inherited(self) -> list['DecimalRange']:
         return self._facet_inherited('decimalRanges', [])
 
     @property
-    def enumerations_inherited(self) -> ListType['Enumeration']:
+    def enumerations_inherited(self) -> list['Enumeration']:
         return self._facet_inherited('enumerations', [])
 
     @property
-    def enumerations_inherited_dict(self) -> Dict[str, 'Enumeration']:
+    def enumerations_inherited_dict(self) -> dict[str, 'Enumeration']:
         return {value.value: value for value in self.enumerations_inherited}
 
     # noinspection PyPep8Naming
@@ -2801,11 +2879,11 @@ class DataType(_HasPrimitives, _HasFacets, DataTypeAccessor):
         return self._facet_inherited('enumerationRef', Null)
 
     @property
-    def patterns_inherited(self) -> ListType['Pattern']:
+    def patterns_inherited(self) -> list['Pattern']:
         return self._facet_inherited('patterns', [])
 
     @property
-    def patterns_inherited_dict(self) -> Dict[str, 'Pattern']:
+    def patterns_inherited_dict(self) -> dict[str, 'Pattern']:
         return {value.value: value for value in self.patterns_inherited}
 
     @property
@@ -2828,7 +2906,7 @@ class DataType(_HasPrimitives, _HasFacets, DataTypeAccessor):
             self.instanceRef_inherited
 
     @property
-    def values(self) -> Union[Dict[str, 'Enumeration'], Dict[str, 'Pattern']]:
+    def values(self) -> Union[dict[str, 'Enumeration'], dict[str, 'Pattern']]:
         return self.enumerations_inherited_dict or \
             self.patterns_inherited_dict
 
@@ -2856,7 +2934,7 @@ class DataType(_HasPrimitives, _HasFacets, DataTypeAccessor):
         # XXX need to review this; for now just return the name or base
         # noinspection PyUnusedLocal
         facet_text = super().format(**kwargs)
-        return self.name or self.base or 'anon'
+        return self.name_public or self.base_public or 'anon'
 
         # if not keyed, this is an empty proxy data type
         # XXX does this happen?
@@ -2891,7 +2969,7 @@ class _Items(_HasDescription):
     items = PropDescr(ListElem, plural=True, doc='Items.', node_cls='_Item')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The class name (so each derived class has a singleton instance)."""
         return cls.__name__
 
@@ -2901,7 +2979,7 @@ class _Item(_HasDescription):
 
     # id is defined on _Base
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The `id` attribute."""
         return dct.get('id')
 
@@ -2952,7 +3030,7 @@ class Bibliography(_HasDescription):
                            doc="Bibliographic references.")
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The class name (so there's a singleton instance)."""
         return cls.__name__
 
@@ -2964,7 +3042,7 @@ class Template(_HasContent):
 
     # id is defined on _Base
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The `id` attribute."""
         return dct.get('id')
 
@@ -3028,7 +3106,7 @@ class Reference(_Base):
 
     # id is defined on _Base
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The `id` attribute."""
         return dct.get('id')
 
@@ -3067,15 +3145,20 @@ class ReferenceDate(_HasContent):
     """A bibliographic `Reference` date."""
 
 
+# XXX this probably shouldn't have content
 class ReferenceHyperlink(_HasContent):
     """A bibliographic `Reference` hyperlink."""
 
 
+# noinspection GrazieInspection
 class Component(_HasDescription, ComponentAccessor):
     """A component definition.
     """
 
+    dmr_noNameCheck = PropDescr(BoolAttr)
+
     name = PropDescr(StrAttr, mandatory=True, doc='Component name.')
+    virtual = PropDescr(BoolAttr, doc='Virtual component?', default=False)
     objects = PropDescr(ListElem, plural=True, doc='Component objects.')
     commands = PropDescr(ListElem, plural=True, doc='Component commands.')
     events = PropDescr(ListElem, plural=True, doc='Component events.')
@@ -3085,7 +3168,7 @@ class Component(_HasDescription, ComponentAccessor):
     profiles = PropDescr(ListElem, plural=True, doc='Component profiles.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Dm_document` key and the `Component.name` attribute."""
         assert parent.instance_in_path(Dm_document) is not None
         return parent.instance_in_path(Dm_document).key, dct.get('name')
@@ -3110,23 +3193,30 @@ class Component(_HasDescription, ComponentAccessor):
         # if defermerge, assume that data is of the form (('name', name),
         # ('foo', foo), ...), use the first element to set name, and pass the
         # rest to the super-class for later expansion
-        # XXX shouldn't assume that 'name' is first
-        # XXX if defermerge, should also pick off the description (then
-        #     wouldn't need to worry about it later)
+        # XXX shouldn't assume that 'name' is first, or that 'virtual' (when
+        #     present) is second
+        # XXX if defermerge, should also pick off other fields such as status
+        #     and description (then wouldn't need to worry about them later)
+        #     (we're already doing this for 'virtual')
+        name, virtual, data_ = None, None, data
         if defermerge:
             assert data and data[0][0] == 'name'
             name = data[0][1]
             data_ = data[1:]
-        else:
-            name = None
-            data_ = data
+            if not data_:
+                data_ = None
+            elif data_[0][0] == 'virtual':
+                virtual = Utility.boolean(data_[0][1])
+                data_ = data_[1:]
 
         super().__init__(key=key, data=data_, defermerge=defermerge,
                          stack=stack, **kwargs)
 
-        # if merge was deferred, need to set the name attribute directly
+        # if merge was deferred, need to set the name and virtual attributes
+        # directly
         if defermerge:
             self.name = name
+            self.virtual = virtual
 
         # do this here rather than in _mergedone() in case merge was deferred
         self.update_entities(self.name)
@@ -3235,49 +3325,6 @@ class ComponentRef(_Base):
         if isinstance(component, ImportComponent):
             component = component.component
 
-        # if not found in current document, look in calling component, if any:
-        # - find component that referenced this one
-        # - if there is one, find it in the current document
-        # - look for desired component in parent (document or import)
-        # XXX this is quite confusing! give an actual example
-        # XXX the explicit ImportComponent logic is messy
-        # XXX disabled because I think it's no longer needed
-        if False and not component:
-            logger.debug('%s: fallback (1) search for component %r' % (
-                self.nicepath, self.ref))
-            calling_component = self.instance_in_stack(stack[:-1],
-                                                       ComponentRef)
-            if calling_component:
-                calling_component_def = document_component_dict.get(
-                        calling_component.ref)
-                if isinstance(calling_component_def, ImportComponent):
-                    calling_component_def = calling_component_def.component
-                if calling_component_def:
-                    calling_component_def_parent = calling_component_def.parent
-                    # noinspection PyUnresolvedReferences
-                    calling_component_def_parent_component_dict = \
-                        calling_component_def_parent.entity_dict(
-                            'components')
-                    component = \
-                        calling_component_def_parent_component_dict.get(
-                            self.ref)
-                    # XXX if it _is_ an ImportComponent, might need to recurse?
-                    if isinstance(component, ImportComponent):
-                        component = component.component
-
-        # if not found in stack, use the component accessor
-        # XXX this is needed for (for example) the DEScanResult component, but
-        #     if a component of the same name is defined in multiple files it
-        #     isn't guaranteed to find the right version
-        # XXX there's clearly something wrong with how components are looked up
-        # XXX disabled because I think it's no longer needed
-        if False and not component:
-            logger.debug('%s: fallback (2) search for component %r' % (
-                self.nicepath, self.ref))
-            # XXX how should we be using name (which is ignored here)?
-            component = \
-                ComponentAccessor.entities.get(self.ref, (None, Null))[1]
-
         # if not found, give up
         if not component:
             logger.error(
@@ -3290,8 +3337,30 @@ class ComponentRef(_Base):
                 self.nicepath, component.name))
         self._component = component
 
-        # if found and there's data, expand the component
-        # XXX why might there not be data?
+        # if the component is virtual, search up the stack for a non-virtual
+        # component (also treat empty components as virtual)
+        if component.virtual or not component.data:
+            dm_documents_in_stack = [node for node in reversed(stack)
+                                     if isinstance(node, Dm_document)]
+            for document in dm_documents_in_stack:
+                components = document.entity_dict('components')
+                if self.ref in components:
+                    comp = components[self.ref]
+                    if isinstance(comp, ImportComponent):
+                        comp = comp.component
+                    if comp:
+                        component = comp
+                        if not component.virtual and component.data:
+                            break
+
+        # report if didn't find a non-virtual (or non-empty) component
+        # (can't report this as a warning because it can legitimately happen
+        # with old models)
+        if component.virtual or not component.data:
+            logger.info("%s: expanding virtual %s component" % (
+                self.nicepath, component.name))
+
+        # if there's data (even if it's virtual), expand the component
         if component.data:
             # XXX need a really good explanation here
             assert self._parent is not None
@@ -3313,12 +3382,16 @@ class ComponentRef(_Base):
             data_ = self.__relocate(data, relpath, previous=previous)
             # the version might be set in a parent component reference
             # noinspection PyTypeChecker
-            component_with_version = self.instance_in_stack(
-                    stack, ComponentRef, lambda n: n.version)
-            if component_with_version is not None and \
-                    component_with_version.version is not None:
-                data_ = self.__clampversion(
-                        data_, component_with_version.version)
+            compref_with_version = self.instance_in_stack(
+                    stack, ComponentRef, lambda n: n.version is not None)
+            parent_version = self.parent.h_version_inherited
+            if self.version is not None and self.version == parent_version:
+                logger.info('%s: %s version %s is unnecessary' % (
+                    self.nicepath, component.name, self.version))
+            # the clamp version defaults to the (inherited) parent version
+            clamp_version = compref_with_version.version if \
+                compref_with_version else parent_version
+            data_ = self.__clampversion(data_, clamp_version)
             # XXX could mark expanded items with their provenance?
             container.merge(data=data_, stack=stack)
             logger.debug('%s: expanded  component %s (from %s)' % (
@@ -3327,28 +3400,13 @@ class ComponentRef(_Base):
         super()._mergedone(stack=stack, report=report)
 
     def __proccomppath(self, *, stack=None):
-        # this ComponentRef's _path attribute, which is defined as follows: "If
+        # this ComponentRef's path attribute, which is defined as follows: "If
         # specified, is relative path between point of reference (inclusion)
         # and the component's items. If not specified, behavior is as if an
         # empty relative path was specified"
 
-        # XXX component path is the concatenation of all parent
-        #     component paths (in the stack); this adds just one of them
-        # XXX I don't think this is correct; object path has a role here;
-        #     need to create a test case that covers all aspects of this
-        comppath = ''
-        calling_component = self.instance_in_stack(stack[:-1], ComponentRef)
-        if calling_component:
-            comppath += calling_component.path or ''
-        comppath += self.path or ''
-
-        # XXX replacement (correct?) logic for the above
-        comppath_ = ''.join((comp.path or '') for comp in stack if
-                            isinstance(comp, ComponentRef))
-        if comppath_ != comppath:
-            logger.warning('comppath %r replaced with %r' % (
-                comppath, comppath_))
-            comppath = comppath_
+        # this componentRef's path attribute
+        comppath = self.path or ''
 
         # absolute path that's the "starting point" for the component's items
         abspath = self.objpath + comppath
@@ -3360,17 +3418,16 @@ class ComponentRef(_Base):
         # if elemname is 'object' then (because objects are always relative to
         # their containing model, input, output or event) the component
         # definition has to be adjusted to be relative to this containing item
-        # XXX this logic can't be quite right, e.g. the object path is not
-        #     communicated directly across a series of nested components
         container = self._parent
         if container.elemname == 'object':
             container = self.instance_in_path((Model, Input, Output, Event))
             assert container is not None
             contpath = container.objpath
-            assert abspath.startswith(contpath)
+            assert abspath.startswith(contpath), \
+                "absolute path %s doesn't start with %s" % (abspath, contpath)
             relpath = abspath[len(contpath):]
-            # XXX command/event objpaths don't end with dots, so (within a
-            #     command/event) this will start with a dot; get rid of it
+            # command/event objpaths don't end with dots, so (within a
+            # command/event) this will start with a dot; get rid of it
             if relpath.startswith('.'):
                 relpath = relpath[1:]
 
@@ -3378,7 +3435,7 @@ class ComponentRef(_Base):
 
     # relocate component data to account for comppath
     def __relocate(self, indata: Data, relpath: str, *, isprofile=False,
-                   previous: Optional[Dict[str, str]] = None) -> Data:
+                   previous: Optional[dict[str, str]] = None) -> Data:
         # items are removed as they are used
         if previous is None:
             previous = {}
@@ -3386,9 +3443,13 @@ class ComponentRef(_Base):
         # build the data as a list
         outdata = []
         for field, value in indata:
-            # component (i.e. non-profile) description is ignored
-            # XXX should have removed it in Component constructor?
-            if field in {'description'} and not isprofile:
+            # component (i.e. non-profile) status and description are ignored
+            # XXX should have removed them in the Component constructor?
+            if field in {'status', 'description'} and not isprofile:
+                if field == 'status' and value != StatusEnum.default:
+                    # XXX this is currently reported at the info level
+                    logger.info('%s: expanded %s %s component' % (
+                        self.nicepath, value, self.ref))
                 continue
 
             # if relative path is empty, no change is needed
@@ -3468,8 +3529,13 @@ class _ModelItem(_HasDescription):
     new nodes) and `base` (for nodes based on another node) attributes.
     """
 
+    dmr_noNameCheck = PropDescr(BoolAttr)
+
     name = PropDescr(RedefineCheckStrAttr, doc='Name of new node.')
     base = PropDescr(StrAttr, doc='Name of node on which this node is based.')
+
+    # some subclasses override this
+    access = None
 
     # this is the name of the previous instance of this class
     __previous_lexical = None
@@ -3522,6 +3588,26 @@ class _ModelItem(_HasDescription):
         else:
             self.base = None
 
+        # check that the version doesn't exceed the DM document's spec version
+        # (this is a bit tricky, because we have to account for the case where
+        # the model item was defined in a component, which might have been
+        # defined in a different file)
+        if self.version is not None:
+            dm_document = self.instance_in_stack(stack, Dm_document)
+            if dm_document and dm_document.spec.version is not None:
+                # XXX this logic only looks for the most recent component
+                #     reference; it should really search up the stack for
+                #     all component references
+                if component_ref := \
+                        self.instance_in_stack(stack, ComponentRef):
+                    component = component_ref.component
+                    dm_document = component.instance_in_path(Dm_document)
+                if dm_document and (spec_version :=
+                                    dm_document.spec.version) is not None:
+                    if self.version > spec_version:
+                        logger.error("%s: version %s > spec version %s" % (
+                            self.nicepath, self.version, spec_version))
+
         super()._mergedone(stack=stack, report=report)
 
     # noinspection PyPep8Naming
@@ -3530,7 +3616,12 @@ class _ModelItem(_HasDescription):
         return self.name or self.base
 
 
-class Model(_ModelItem, ModelAccessor):
+# TBD common (Model, _Dt_model) items
+class _Model(_Mixin):
+    pass
+
+
+class Model(_ModelItem, _Model, ModelAccessor):
     """A model definition.
     """
 
@@ -3543,18 +3634,31 @@ class Model(_ModelItem, ModelAccessor):
     profiles = PropDescr(ListElem, plural=True, doc='Model profiles.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, *, stack: Optional[Stack] = None,
+    def calckey(cls, parent: Node, dct: dict, *, stack: Optional[Stack] = None,
                 **kwargs) -> Key:
-        """The `Xml_file` name and the `_ModelItem.name` attribute with the
-        minor version removed."""
+        """The `Xml_file` name and the `_ModelItem.base` or (as a fallback)
+        `_ModelItem.name` attribute with the minor version removed."""
+
         name, base = (dct.get(a) for a in ('name', 'base'))
-        name_major = re.sub(r'([^:]+):(\d+)\.(\d+)', r'\1:\2',
-                            name or base or '')
+        base_or_name_major = re.sub(r'([^:]+):(\d+)\.(\d+)', r'\1:\2',
+                                    base or name or '')
+
+        # XXX this might have been defined under a different name in a
+        #     separate file (the common case is importing XXX as _XXX),
+        #     so should consult the imports; however, for now, just discard
+        #     a leading underscore
+        if base_or_name_major.startswith('_'):
+            base_or_name_major = base_or_name_major[1:]
+
         # noinspection PyTypeChecker
         xml_file = cls.instance_in_stack(
                 stack, Xml_file,
                 predicate=lambda f: f.parent.elemname == 'root')
-        return str(xml_file), name_major
+
+        # XXX this was str(xml_file), which is just the filename and is
+        #     usually OK, but prevents comparing two files with the same
+        #     name in different directories
+        return xml_file.keylast, base_or_name_major
 
     # XXX components and models could share some 'defermerge' logic?
     # XXX could extend 'defermerge' to objects etc.
@@ -3572,8 +3676,9 @@ class Model(_ModelItem, ModelAccessor):
         # assume that data is of the form (('name', name), ('foo', foo), ...),
         # so can set the model name
         # XXX shouldn't assume that 'name' is first
+        # XXX also allow 'ref', to accommodate Dt_model
         if defermerge:
-            assert data and data[0][0] == 'name'
+            assert data and data[0][0] in {'name', 'ref'}
             self.name = data[0][1]
 
         # do this here rather than in _mergedone() in case merge was deferred
@@ -3591,9 +3696,9 @@ class Model(_ModelItem, ModelAccessor):
     # the version at which the model was created; always an n.0 version
     @property
     @cache
-    def version_inherited(self) -> Optional[Version]:
+    def version_inherited(self) -> Version:
         if self.version is not None:
-            return self.version
+            return cast(Version, self.version)
         else:
             major = re.findall(r':(\d+)', self.name)
             assert len(major) == 1
@@ -3602,13 +3707,13 @@ class Model(_ModelItem, ModelAccessor):
     # this is needed in order to get Model's version_inherited behavior
     @property
     @cache
-    def object_version_inherited(self) -> Optional[Version]:
+    def h_version_inherited(self) -> Optional[Version]:
         return self.version_inherited
 
     # XXX should try to optimize this
     @property
     @cache
-    def object_objects(self) -> ListElem.ListWrapper['Object']:
+    def h_objects(self) -> ListElem.ListWrapper['Object']:
         objs = {}
         for obj in self.objects:
             path = Path(obj.nameOrBase)
@@ -3619,9 +3724,9 @@ class Model(_ModelItem, ModelAccessor):
 
     @property
     @cache
-    def object_elems(self) -> Tuple[Node, ...]:
+    def h_elems(self) -> tuple[Node, ...]:
         return tuple(elem for elem in self.elems if not
-                     isinstance(elem, Object) or elem in self.object_objects)
+                     isinstance(elem, Object) or elem in self.h_objects)
 
     # XXX should also provide a --usp command-line option and/or should
     #     provide a set of flags such as 'ignore enable parameter'
@@ -3647,7 +3752,19 @@ class Model(_ModelItem, ModelAccessor):
         return super().format(**kwargs) or self.name
 
 
-class Object(_ModelItem):
+# TBD common (Object, _Dt_object) items
+class _Object(_Mixin):
+    # XXX this should be moved to Path
+    @staticmethod
+    @cache
+    def _path_split(value: str) -> tuple[str, str]:
+        path = Path(value)
+        head = '.'.join(path.comps[:-2] + [''])
+        tail = '.'.join(path.comps[-2:])
+        return head, tail
+
+
+class Object(_ModelItem, _Object):
     """An object definition.
 
     Note:
@@ -3660,8 +3777,8 @@ class Object(_ModelItem):
     dmr_fixedObject = PropDescr(BoolAttr)
     dmr_noDiscriminatorParameter = PropDescr(BoolAttr)
 
-    access = PropDescr(EnumStrAttr, values=('readOnly', 'readWrite'),
-                       default='readOnly', doc='Object access.')
+    access = PropDescr(EnumObjAttr, enum_cls=ObjectAccessEnum,
+                       doc='Object access.')
     minEntries = PropDescr(IntAttr, default=1,
                            doc='Minimum number of object entries.')
     maxEntries = PropDescr(IntOrUnboundedAttr, default=1,
@@ -3673,8 +3790,7 @@ class Object(_ModelItem):
                                 doc="Name of the object's enable parameter.")
     discriminatorParameter = PropDescr(StrAttr, doc="Name of the object's "
                                                     "discriminator parameter.")
-    mountType = PropDescr(EnumStrAttr,
-                          values=('none', 'mountable', 'mountPoint'),
+    mountType = PropDescr(EnumObjAttr, enum_cls=MountTypeEnum,
                           doc='Object mount type (``none`` and ``mountable`` '
                               'are deprecated).')
     uniqueKeys = PropDescr(ListElem, plural=True, doc='Object unique keys.')
@@ -3684,7 +3800,7 @@ class Object(_ModelItem):
     parameters = PropDescr(ListElem, plural=True, doc='Object parameters.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Model` (or `Component`) key, parent object path,
         and the `_ModelItem.name` attribute.
 
@@ -3714,7 +3830,7 @@ class Object(_ModelItem):
             'DEF' if self.name and not self.base else 'ref', self))
 
         # XXX this should never happen
-        if not self.args.thisonly and not self.object_parent:
+        if not self.args.thisonly and not self.h_parent:
             logger.warning("%s: parent hasn't yet been defined" %
                            self.nicepath)
 
@@ -3727,7 +3843,7 @@ class Object(_ModelItem):
 
     @property
     def is_writable(self) -> bool:
-        return self.access in {'readWrite'}
+        return self.access.value in {'readWrite'}
 
     @property
     def is_multi(self) -> bool:
@@ -3751,10 +3867,10 @@ class Object(_ModelItem):
     #     not sure... definitely want an h_elems property... perhaps put them
     #     all on a sub-object?
 
-    # XXX this also needs to be implemented for ObjectRef
+    # XXX this also needs to be implemented for ObjectRef and Dt_object
     @property
     @cache
-    def object_parent(self) -> Optional[Union[Model, 'Object']]:
+    def h_parent(self) -> Optional[Union[Model, 'Object']]:
         name_or_base = self.nameOrBase
         assert name_or_base is not None
         head, _ = self._path_split(name_or_base)
@@ -3763,12 +3879,17 @@ class Object(_ModelItem):
         else:
             parent_key = self.key[:-1] + (head,)
             parent = self.find(Object, *parent_key)
+            if not parent:
+                # this should only happen when there's something wrong, but
+                # it's safer and more consistent to return the model in this
+                # case (self.parent will be the model)
+                parent = self.parent
         return parent
 
     # XXX should try to optimize this
     @property
     @cache
-    def object_objects(self) -> ListElem.ListWrapper['Object']:
+    def h_objects(self) -> ListElem.ListWrapper['Object']:
         model = self.instance_in_path(Model)
         assert model is not None
         objs = ListElem.ListWrapper()
@@ -3780,16 +3901,16 @@ class Object(_ModelItem):
 
     @property
     @cache
-    def object_elems(self) -> Tuple[Node, ...]:
+    def h_elems(self) -> tuple[Node, ...]:
         # XXX ideally the objects would be inserted in a more logical place
-        return tuple(self.elems + tuple(self.object_objects))
+        return tuple(self.elems + tuple(self.h_objects))
 
     # XXX should all these be defined on _Base? this would save isinstance()
     #     checks but would rather pollute the namespace; maybe defined on
     #     _ModelItem as a compromise?
     @property
     @cache
-    def object_name(self) -> Optional[str]:
+    def h_name(self) -> Optional[str]:
         if self.name is None:
             return None
         else:
@@ -3798,7 +3919,7 @@ class Object(_ModelItem):
 
     @property
     @cache
-    def object_base(self) -> Optional[str]:
+    def h_base(self) -> Optional[str]:
         if self.base is None:
             return None
         else:
@@ -3806,22 +3927,14 @@ class Object(_ModelItem):
             return tail
 
     @property
-    def object_nameonly(self) -> Optional[str]:
-        return re.sub(r'(\.{i})?\.$', '', self.object_name) if \
-            self.object_name else None
+    def h_nameonly(self) -> Optional[str]:
+        return re.sub(r'(\.{i})?\.$', '', self.h_name) if \
+            self.h_name else None
 
     @property
-    def object_baseonly(self) -> Optional[str]:
-        return re.sub(r'(\.{i})?\.$', '', self.object_base) if \
-            self.object_base else None
-
-    @staticmethod
-    @cache
-    def _path_split(value: str) -> Tuple[str, str]:
-        path = Path(value)
-        head = '.'.join(path.comps[:-2] + [''])
-        tail = '.'.join(path.comps[-2:])
-        return head, tail
+    def h_baseonly(self) -> Optional[str]:
+        return re.sub(r'(\.{i})?\.$', '', self.h_base) if \
+            self.h_base else None
 
     # noinspection PyPep8Naming
     @property
@@ -3833,8 +3946,8 @@ class Object(_ModelItem):
             The referenced node, or `Null` if not found.
         """
 
-        return follow_reference(self, self.enableParameter, scope='object',
-                                quiet=PATH_QUIET)
+        return follow_reference(self, self.enableParameter,
+                                scope=ScopeEnum('object'), quiet=PATH_QUIET)
 
     # noinspection PyPep8Naming
     @property
@@ -3850,7 +3963,7 @@ class Object(_ModelItem):
             node = Null
         else:
             target = '#.%s' % self.numEntriesParameter
-            node = follow_reference(self, target, scope='object',
+            node = follow_reference(self, target, scope=ScopeEnum('object'),
                                     quiet=PATH_QUIET)
         return node
 
@@ -3868,7 +3981,7 @@ class Object(_ModelItem):
             node = Null
         else:
             target = '#.%s' % self.discriminatorParameter
-            node = follow_reference(self, target, scope='object',
+            node = follow_reference(self, target, scope=ScopeEnum('object'),
                                     quiet=PATH_QUIET)
         return node
 
@@ -3900,7 +4013,12 @@ class Object(_ModelItem):
         return text
 
 
-class Command(_ModelItem):
+# TBD common (Command, _Dt_command) items
+class _Command(_Mixin):
+    pass
+
+
+class Command(_ModelItem, _Command):
     """A command definition.
     """
 
@@ -3914,7 +4032,7 @@ class Command(_ModelItem):
     output = PropDescr(SingleElem, doc='Output arguments.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Model` (or `Component`) key, parent `Object` path,
         and the `_ModelItem.name` attribute (plus a ``.``)."""
         model_or_component = parent.instance_in_path((Model, Component))
@@ -3939,21 +4057,36 @@ class _Arguments(_HasDescription):
     parameters = PropDescr(ListElem, plural=True, doc='Arguments parameters.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Command` or `Event` key and the class name (plus a
         ``.``)."""
         return parent.key, cls.__name__ + '.'
 
 
-class Input(_Arguments):
+# TBD common (Input, _Dt_input) items
+class _Input(_Mixin):
+    pass
+
+
+class Input(_Arguments, _Input):
     """`Command` input arguments."""
 
 
-class Output(_Arguments):
+# TBD common (Output, _Dt_output) items
+class _Output(_Mixin):
+    pass
+
+
+class Output(_Arguments, _Output):
     """`Command` output arguments."""
 
 
-class Event(_ModelItem):
+# TBD common (Event, _Dt_event) items
+class _Event(_Mixin):
+    pass
+
+
+class Event(_ModelItem, _Event):
     """An event definition.
     """
 
@@ -3967,7 +4100,7 @@ class Event(_ModelItem):
     parameters = PropDescr(ListElem, plural=True, doc='Event parameters.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Model` (or `Component`) key, parent `Object` path,
         and the `_ModelItem.name` attribute (plus a ``.``)."""
         model_or_component = parent.instance_in_path((Model, Component))
@@ -3989,7 +4122,12 @@ class UniqueKey(_Base):
         return '{' + ','.join(p.ref for p in self.parameters) + '}'
 
 
-class Parameter(_ModelItem):
+# TBD common (Parameter, _Dt_parameter) items
+class _Parameter(_Mixin):
+    pass
+
+
+class Parameter(_ModelItem, _Parameter):
     """A parameter definition.
 
     Note:
@@ -4003,12 +4141,10 @@ class Parameter(_ModelItem):
     dmr_customNumEntriesParameter = PropDescr(BoolAttr)
     dmr_noUnitsTemplate = PropDescr(BoolAttr)
 
-    access = PropDescr(EnumStrAttr,
-                       values=('readOnly', 'readWrite', 'writeOnceReadOnly'),
-                       default='readOnly', doc='Parameter access.')
-    activeNotify = PropDescr(EnumStrAttr, values=(
-        'normal', 'forceEnabled', 'forceDefaultEnabled', 'canDeny'),
-                             default='normal', doc='Parameter active notify.')
+    access = PropDescr(EnumObjAttr, enum_cls=ParameterAccessEnum,
+                       doc='Parameter access.')
+    activeNotify = PropDescr(EnumObjAttr, enum_cls=ActiveNotifyEnum,
+                             doc='Parameter active notify.')
     forcedInform = PropDescr(BoolAttr, default=False,
                              doc='Parameter forced inform.')
     syntax = PropDescr(SyntaxSingleElem, doc='Parameter syntax.')
@@ -4030,7 +4166,7 @@ class Parameter(_ModelItem):
                                    'this parameter.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Model` (or `Component`) key, parent `Object` path,
         and the `_ModelItem.name` attribute."""
         model_or_component = parent.instance_in_path((Model, Component))
@@ -4058,7 +4194,7 @@ class Parameter(_ModelItem):
 
     @property
     def is_writable(self) -> bool:
-        return self.access in {'readWrite', 'writeOnceReadOnly'}
+        return self.access.value in {'readWrite', 'writeOnceReadOnly'}
 
     auto_macro_criteria = {
         'showid': lambda node: node.id,
@@ -4073,12 +4209,15 @@ class Parameter(_ModelItem):
         'pattern': lambda node: (node.syntax.patterns or
                                  node.syntax.string.patterns or
                                  node.syntax.dataType.patterns, ''),
+        'access': lambda node: node.access == 'writeOnceReadOnly',
         'hidden': lambda node: node.syntax.hidden,
         'secured': lambda node: node.syntax.secured,
         'factory': lambda node: node.syntax.default.type == 'factory',
         'impldef': lambda node: node.syntax.default.type == 'implementation',
         'paramdef': lambda node: node.syntax.default.type == 'parameter',
-        'keys': lambda node: node.uniqueKeyNodes
+        'keys': lambda node: node.uniqueKeyNodes,
+        'inform': lambda node: node.forcedInform,
+        'notify': lambda node: node.activeNotify != 'normal'
     }
 
     def format(self, *, typ: bool = False, prim: bool = False,
@@ -4087,6 +4226,9 @@ class Parameter(_ModelItem):
         if not typ:
             # this will return the superclass value, i.e. the parameter name
             pass
+        elif not self.syntax:
+            # parameter didn't specify a data type
+            text = 'untyped'
         elif not human:
             text = self.syntax.format(prim=prim, **kwargs)
         else:
@@ -4120,7 +4262,7 @@ class Syntax(DataType):
         # XXX really should adjust the class hierarchy to impose these rules...
         #     again
         assert not self.name and not self.base and not (
-                self.primitive and self.dataType),\
+                self.primitive and self.dataType), \
             '%s: invalid configuration' % self.nicepath
 
         # the remaining checks require the sub-hierarchy to be populated
@@ -4235,7 +4377,7 @@ class _Primitive(_DataTypeBase):
         return DataTypeAccessor.entities.get(self.elemname, (None, Null))[1]
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -4295,7 +4437,7 @@ class Base64(_Primitive, _HasSizes):
     null = ''
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         import base64
         import binascii
@@ -4320,7 +4462,7 @@ class Boolean(_Primitive):
     null = False
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         # allow a boolean value to be supplied (_is_ a boolean value ever
         # supplied?)
@@ -4335,24 +4477,28 @@ class DateTime(_Primitive):
     usage = """
         The subset of the ISO 8601 date-time format defined by the SOAP
         *dateTime* type {{bibref|SOAP1.1}}."""
-    # XXX TR-106 3.2.1 has missing hyphens in 'time since boot' examples
-    regex = re.compile(r'-?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?'
+    regex = re.compile(r'-?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?' +
                        r'(([+-]00:00)|Z)?')  # see TR-106 3.2.1
     human = 'date/time'
     null = '0001-01-01T00:00:00Z'
 
 
-# XXX this is not documented in TR-106 I.4
 class Decimal(_Primitive, _HasDecimalRanges2, _HasUnits):
     """A decimal node."""
 
-    # XXX TR-106 doesn't define these
     usage = """
-        Decimal TBD."""
+        Decimal number, with optional sign and optional fractional part.
+
+        For some *decimal* types, a value range is given using the form
+        *decimal(Min:Max)* or *decimal(Min:Max step Step)* where the *Min*
+        and *Max* values are inclusive. If either *Min* or *Max* are missing,
+        this indicates no limit. If *Step* is missing, this indicates a
+        step of *1.0*. Multiple comma-separated ranges can be specified,
+        in which case the value will be in one of the ranges."""
 
     regex = re.compile(r'-?\d+(\.\d*)?')
     allowed_facets = {'DecimalRange', 'Units'}
-    null = '0'  # note that it's a string
+    null = '-1'  # note that it's a string
 
 
 class HexBinary(_Primitive, _HasSizes):
@@ -4374,7 +4520,7 @@ class HexBinary(_Primitive, _HasSizes):
     null = ''
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         # length (the decoded length) is used rather than len(value)
         length = int((len(value) + 1) / 2)
@@ -4494,7 +4640,7 @@ class DataTypeRef(DataType):
     # noinspection PyPep8Naming
     @property
     def baseNode(self) -> Union['DataType', NullType]:
-        """Get the node referenced by `base` (or `ref`)..
+        """Get the node referenced by `base` (or `ref`).
 
         Returns:
             The referenced node, or `Null` if not found.
@@ -4538,7 +4684,7 @@ class DataTypeRef(DataType):
         # noinspection PyUnreachableCode
         if False:
             logger.warning('%s: facets text %s' % (self.base, facets_text))
-        text = self.base or ''
+        text = self.base_public or ''
         if not human:
             if prim and (primitive := self.primitive_inherited):
                 text = primitive.format(**kwargs)
@@ -4557,13 +4703,13 @@ class DataTypeRef(DataType):
 class _Facet(_HasDescription, _HasValueMixin):
     """Base class for facets."""
 
-    # XXX this should be EnumStrAttr
-    access = PropDescr(StrAttr, default='readWrite', doc='Facet access.')
+    access = PropDescr(EnumObjAttr, enum_cls=FacetAccessEnum,
+                       doc='Facet access.')
     optional = PropDescr(BoolAttr, default=False, doc='Optional?')
 
     @property
     def is_writable(self) -> bool:
-        return self.access in {'readWrite'}
+        return self.access.value in {'readWrite'}
 
 
 # XXX possibly temporarily, Default and List aren't derived from _Facet;
@@ -4576,8 +4722,7 @@ class Default(_HasDescription):
         which is not ideal.
     """
 
-    type = PropDescr(EnumStrAttr, values=(
-        'factory', 'object', 'implementation', 'parameter'), mandatory=True,
+    type = PropDescr(EnumObjAttr, enum_cls=DefaultTypeEnum, mandatory=True,
                      doc='Default type.')
     value = PropDescr(StrAttr, mandatory=True, doc='Default value.')
 
@@ -4610,12 +4755,13 @@ class Enumeration(_ValueFacet):
     """Enumeration facet.
     """
 
+    dmr_noNameCheck = PropDescr(BoolAttr)
     dmr_noUnionObject = PropDescr(BoolAttr)
 
     code = PropDescr(IntAttr, doc='Code.')
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -4631,9 +4777,7 @@ class EnumerationRef(_Facet):
     """
 
     targetParam = PropDescr(StrAttr, mandatory=True, doc='Target parameters.')
-    targetParamScope = PropDescr(EnumStrAttr,
-                                 values=('normal', 'model', 'object'),
-                                 default='normal',
+    targetParamScope = PropDescr(EnumObjAttr, enum_cls=ScopeEnum,
                                  doc='Target parameter scope.')
     # XXX should this have a default?
     nullValue = PropDescr(StrAttr, doc='Null value.')
@@ -4667,8 +4811,8 @@ class EnumerationRef(_Facet):
 
 
 class _HasRefType(_Mixin):
-    refType = PropDescr(EnumStrAttr, values=('weak', 'strong'), mandatory=True,
-                        doc='Reference type.')
+    refType = PropDescr(EnumObjAttr, enum_cls=ReferenceTypeEnum,
+                        mandatory=True, doc='Reference type.')
 
 
 class InstanceRef(_Facet, _HasRefType):
@@ -4676,9 +4820,8 @@ class InstanceRef(_Facet, _HasRefType):
     """
 
     targetParent = PropDescr(StrAttr, doc='Target parent.')
-    targetParentScope = PropDescr(EnumStrAttr,
-                                  values=('normal', 'model', 'object'),
-                                  default='normal', doc='Target parent scope.')
+    targetParentScope = PropDescr(EnumObjAttr, enum_cls=ScopeEnum,
+                                  doc='Target parent scope.')
 
     # noinspection PyPep8Naming
     @property
@@ -4704,9 +4847,7 @@ class List(_HasDescription, _HasSizes):
                          doc='Minimum number of list items.')
     maxItems = PropDescr(IntOrUnboundedAttr, default='unbounded',
                          doc='Maximum number of list items, or ``unbounded``.')
-    nestedBrackets = PropDescr(EnumStrAttr,
-                               values=('legacy', 'permitted', 'required'),
-                               default='legacy',
+    nestedBrackets = PropDescr(EnumObjAttr, enum_cls=NestedBracketsEnum,
                                doc='Nested Brackets support.')
 
     def format(self, *, human: bool = False, **kwargs) -> str:
@@ -4723,8 +4864,10 @@ class List(_HasDescription, _HasSizes):
             text += '['
             if min_def:
                 text += '%s' % min_val
+            if min_def or max_def:
+                text += ':'
             if max_def:
-                text += ':%s' % max_val
+                text += '%s' % max_val
             text += ']'
         else:
             if min_def or max_def:
@@ -4737,7 +4880,7 @@ class List(_HasDescription, _HasSizes):
                     text += 'at least %s' % min_val
                 elif max_def:
                     text += 'up to %s' % max_val
-                text += ' items)'
+                text += ' item)' if text.endswith(' 1') else ' items)'
 
         # the overall entries and length information always goes at the end
         text += length
@@ -4750,17 +4893,12 @@ class PathRef(_Facet, _HasRefType):
     """
 
     targetParents = PropDescr(StrListAttr, plural=True, doc='Target parents.')
-    targetParentScope = PropDescr(EnumStrAttr,
-                                  values=('normal', 'model', 'object'),
-                                  default='normal', doc='Target parent scope.')
-    # XXX the final value should be a pattern matching user-defined type names
-    targetType = PropDescr(EnumStrAttr, values=(
-        'any', 'parameter', 'object', 'single', 'table', 'row'), default='any',
+    targetParentScope = PropDescr(EnumObjAttr, enum_cls=ScopeEnum,
+                                  doc='Target parent scope.')
+    targetType = PropDescr(EnumObjAttr, enum_cls=TargetTypeEnum,
                            doc='Target type.')
-    targetDataType = PropDescr(StrAttr, values=(
-        'any', 'base64', 'boolean', 'dateTime', 'decimal', 'hexBinary',
-        'integer', 'int', 'long', 'string', 'unsignedInt', 'unsignedLong',
-        'dataType'), default='any', doc='Target data type.')
+    targetDataType = PropDescr(EnumObjAttr, enum_cls=TargetDataTypeEnum,
+                               doc='Target data type.')
 
     def format(self, **kwargs) -> str:
         """The `targetParents`, separated with spaces."""
@@ -4769,7 +4907,7 @@ class PathRef(_Facet, _HasRefType):
     # noinspection PyPep8Naming
     @property
     @cache
-    def targetParentsNodes(self) -> ListType[Union[Node, NullType]]:
+    def targetParentsNodes(self) -> list[Union[Node, NullType]]:
         """Get the nodes referenced by `targetParents`.
 
         Returns:
@@ -4800,7 +4938,7 @@ class Pattern(_ValueFacet):
     """Pattern facet."""
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        nopatterncheck: bool = False,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
@@ -4835,9 +4973,9 @@ class _PrangeFacet(_Facet):
 
     # XXX this needs to be done only once; errors should be reported then
     @classmethod
-    def prange_clean(cls, old: ListType['_PrangeFacet'], *,
-                     errors: Optional[ListType] = None) \
-            -> ListType['_PrangeFacet']:
+    def prange_clean(cls, old: list['_PrangeFacet'], *,
+                     errors: Optional[list] = None) \
+            -> list['_PrangeFacet']:
         """Clean a list of python range facets, where possible combining
         overlapping and adjacent ranges."""
 
@@ -4875,7 +5013,7 @@ class _PrangeFacet(_Facet):
     @classmethod
     def prange_check(cls, haystacks: list['_PrangeFacet'],
                      needles: list[Union['_PrangeFacet', range]], *,
-                     expand: bool = False, errors: Optional[ListType] = None) \
+                     expand: bool = False, errors: Optional[list] = None) \
             -> bool:
         for needle in needles:
             found = False
@@ -5021,7 +5159,7 @@ class Range(_PrangeFacet):
                             range(start, stop, step))
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -5074,7 +5212,7 @@ class Size(_PrangeFacet):
                         range(start, stop))
 
     def is_valid_value(self, value: Any, *,
-                       errors: Optional[ListType[str]] = None,
+                       errors: Optional[list[str]] = None,
                        **kwargs) -> bool:
         if not super().is_valid_value(value, errors=errors, **kwargs):
             return False
@@ -5121,7 +5259,7 @@ class Profile(_ModelItem):
                            doc='Profile parameters.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Model` (or `Component`) key and the
         `_ModelItem.name` attribute."""
         model_or_component = parent.instance_in_path((Model, Component))
@@ -5133,7 +5271,7 @@ class Profile(_ModelItem):
     #     good enough; need to place them in the hierarchy
     def profile_expand(self, *, base: bool = False, extends: bool = False,
                        internal_only: bool = False, items_only: bool =
-                       False) -> ListType[Union[Description, '_ProfileItem']]:
+                       False) -> list[Union[Description, '_ProfileItem']]:
         """Expand a profile, returning am ordered list of its elements and (if
         requested) of its `base` and/or `extends` profiles."""
 
@@ -5152,7 +5290,7 @@ class Profile(_ModelItem):
                 expand_elem(elem)
 
         def expand_dependencies(prof: Profile, *,
-                                active: Optional[ListType[Profile]] = None) \
+                                active: Optional[list[Profile]] = None) \
                 -> None:
             if active is None:
                 active = []
@@ -5224,7 +5362,7 @@ class Profile(_ModelItem):
     # noinspection PyPep8Naming
     @property
     @cache
-    def extendsNodes(self) -> ListType[Union['Profile', NullType]]:
+    def extendsNodes(self) -> list[Union['Profile', NullType]]:
         """Get the nodes referenced by `extends`.
 
         Returns:
@@ -5250,6 +5388,9 @@ class _ProfileItem(_HasDescription):
     """
 
     ref = PropDescr(StrAttr, mandatory=True, doc='Ref.')
+
+    # some subclasses override this
+    requirement = None
 
     def _mergedone(self, *, stack=None, report=None):
         """Check that the ``ref`` attribute was specified."""
@@ -5278,9 +5419,8 @@ class ObjectRef(_ProfileItem):
 
     dmr_previousObject = PropDescr(StrAttr)
 
-    requirement = PropDescr(EnumStrAttr, values=(
-        'notSpecified', 'present', 'create', 'delete', 'createDelete'),
-                            mandatory=True, doc='Requirement.')
+    requirement = PropDescr(EnumObjAttr, enum_cls=ObjectRequirementEnum,
+                            mandatory=True, doc='Object requirement.')
     commands = PropDescr(ListElem, plural=True, node_cls='CommandRef',
                          doc='Object commands.')
     events = PropDescr(ListElem, plural=True, node_cls='EventRef',
@@ -5289,7 +5429,7 @@ class ObjectRef(_ProfileItem):
                            doc='Object parameters.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Profile` key and the `_ProfileItem.ref`
         attribute."""
         assert parent.instance_in_path(Profile) is not None
@@ -5309,7 +5449,7 @@ class ObjectRef(_ProfileItem):
         # refNode, or the model
         node = (self.instance_in_path((CommandRef, EventRef)).refNode or
                 self.model_in_path)
-        return follow_reference(node, self.ref, scope='normal',
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
                                 quiet=PATH_QUIET)
 
 
@@ -5322,11 +5462,11 @@ class ParameterRef(_ProfileItem):
     dmr_previousEvent = PropDescr(StrAttr)
     dmr_previousParameter = PropDescr(StrAttr)
 
-    requirement = PropDescr(EnumStrAttr, values=('readOnly', 'readWrite'),
-                            mandatory=True, doc='Requirement.')
+    requirement = PropDescr(EnumObjAttr, enum_cls=ParameterRequirementEnum,
+                            mandatory=True, doc='Parameter requirement.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Profile` key, `ObjectRef` path and the
         `_ProfileItem.ref` attribute."""
         # XXX temporary until we have a ParameterKey class
@@ -5351,7 +5491,7 @@ class ParameterRef(_ProfileItem):
         types = (CommandRef, EventRef, ObjectRef)
         node = (self.object_in_path or
                 self.instance_in_path(types).refNode or self.model_in_path)
-        return follow_reference(node, self.ref, scope='normal',
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
                                 quiet=PATH_QUIET)
 
     # XXX can't rely on self.keylast because of the above UniqueKey logic
@@ -5373,7 +5513,7 @@ class CommandRef(_ProfileItem):
                        doc='Command output arguments.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Profile` key, `ObjectRef` path and the
         `_ProfileItem.ref` attribute (plus a ``.``)."""
         assert parent.instance_in_path(Profile) is not None
@@ -5393,7 +5533,7 @@ class CommandRef(_ProfileItem):
         # the ref is relative to the containing object reference's refNode,
         # or the model
         node = self.instance_in_path(ObjectRef).refNode or self.model_in_path
-        return follow_reference(node, self.ref, scope='normal',
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
                                 quiet=PATH_QUIET)
 
 
@@ -5405,7 +5545,7 @@ class _ArgumentsRef(_HasDescription):
     parameters = PropDescr(ListElem, plural=True, node_cls='ParameterRef')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `CommandRef` or `EventRef` key and the class name
         (plus a ``.``)."""
         return parent.key, cls.__name__ + '.'
@@ -5436,7 +5576,7 @@ class EventRef(_ProfileItem):
                            doc='Event parameters.')
 
     @classmethod
-    def calckey(cls, parent: Node, dct: Dict, **kwargs) -> Key:
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The parent `Profile` key, `ObjectRef` path and the
         `_ProfileItem.ref` attribute (plus a ``.``)."""
         assert parent.instance_in_path(Profile) is not None
@@ -5456,8 +5596,325 @@ class EventRef(_ProfileItem):
         # the ref is relative to the containing object reference's refNode,
         # or the model
         node = self.instance_in_path(ObjectRef).refNode or self.model_in_path
-        return follow_reference(node, self.ref, scope='normal',
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
                                 quiet=PATH_QUIET)
+
+############
+# DT support
+
+
+# XXX _HasContent is problematic, because it's on the main DM inheritance
+#     line so using it pollutes things; it should be a _Mixin
+# noinspection PyPep8Naming
+class Dt_annotation(_HasContent):
+    """A DT annotation element.
+    """
+
+
+# noinspection PyPep8Naming
+class Dt_document(_Base, _Document):
+    """A DT document."""
+
+    xmlns_dt = PropDescr(NamespaceStrAttr, doc='DT namespace.')
+
+    deviceType = PropDescr(StrAttr, doc='Device type.')
+    uuid = PropDescr(StrAttr, doc='UUID.')
+
+    annotation = PropDescr(DescriptionSingleElem, node_cls='Dt_annotation',
+                           doc="Annotation.")
+
+    imports = PropDescr(ListElem, plural=True, doc="Imports.")
+    models = PropDescr(ListElem, plural=True, node_cls='Dt_model',
+                       doc="Models.")
+
+    # XXX does DT have a file attribute?
+    @property
+    def file_safe(self) -> FileName:
+        assert isinstance(self.parent, Xml_file)
+        return FileName(os.path.basename(self.parent.keylast))
+
+    @property
+    def file_info(self) -> dict[str, Optional[str]]:
+        return {'Device type': self.deviceType, 'UUID': self.uuid}
+
+
+# noinspection PyPep8Naming
+class _Dt_item(_Base0):
+    ref = PropDescr(StrAttr)
+
+    annotation = PropDescr(DescriptionSingleElem, node_cls='Dt_annotation',
+                           doc="Annotation.")
+
+    # XXX I think we can have a mostly-shared implementation for this
+    # noinspection PyPep8Naming
+    @property
+    @cache
+    def refNode(self) -> Union[Model, NullType]:
+        """Get the node referenced by `ref`.
+
+        Returns:
+            The referenced node, or `Null` if not found.
+        """
+
+        raise NotImplementedError
+
+    # need explicit implementation because otherwise would get _Node.format()
+    def format(self, typ: bool = False, **kwargs) -> str:
+        if not typ:
+            return self.ref or super().format(**kwargs)
+        else:
+            return self.refNode.format(typ=typ, **kwargs)
+
+    # this gets public attributes from the referenced object
+    def __getattr__(self, attr) -> Any:
+        if attr.startswith('_'):
+            # this is expected
+            raise AttributeError
+
+        if (ref_node := self.refNode) is Null:
+            # this is unexpected
+            text = '%s.%s (%s not found)' % (type(self).__name__, attr,
+                                             self.ref)
+            raise NodeException(text, self.ref)
+
+        return getattr(ref_node, attr)
+
+
+# noinspection PyPep8Naming
+# XXX would like this to be a Model, but this doesn't currently work
+class Dt_model(_Dt_item, _Model):
+    parameters = PropDescr(ListElem, plural=True, node_cls='Dt_parameter')
+    objects = PropDescr(ListElem, plural=True, node_cls='Dt_object')
+
+    def merge(self, *, stack: Optional[Stack] = None, **kwargs) -> Any:
+        self.refNode.merge(stack=stack)
+
+    # noinspection PyPep8Naming
+    @property
+    @cache
+    def refNode(self) -> Union[Model, NullType]:
+        """Get the node referenced by `ref`.
+
+        Returns:
+            The referenced node, or `Null` if not found.
+        """
+
+        return ModelAccessor.entities[self.ref][1] if \
+            self.ref in ModelAccessor.entities else Null
+
+    # XXX should try to optimize this
+    @property
+    @cache
+    def h_objects(self) -> ListElem.ListWrapper['Dt_object']:
+        objs = {}
+        for obj in self.objects:
+            path = Path(obj.ref)
+            name, *rest = path.comps
+            if len(rest) == 1 and name not in objs:
+                objs[name] = obj
+        return ListElem.ListWrapper(objs.values())
+
+    @property
+    @cache
+    def h_elems(self) -> tuple[Node, ...]:
+        return tuple(elem for elem in self.elems if not isinstance(
+                elem, Dt_object) or elem in self.h_objects)
+
+    # this is needed to prevent getting profiles from the referenced model
+    @property
+    def profiles(self) -> list[Profile]:
+        return []
+
+
+# noinspection PyPep8Naming
+class Dt_object(_Dt_item, _Object):
+    # XXX the DT schema doesn't permit this; this is an error?
+    access = PropDescr(EnumObjAttr, enum_cls=Dt_objectAccessEnum,
+                       doc='Object access.')
+    minEntries = PropDescr(IntAttr, default=1,
+                           doc='Minimum number of object entries.')
+    maxEntries = PropDescr(IntOrUnboundedAttr, default=1,
+                           doc='Maximum number of object entries, '
+                               'or ``unbounded``.')
+
+    parameters = PropDescr(ListElem, plural=True, node_cls='Dt_parameter')
+    commands = PropDescr(ListElem, plural=True, node_cls='Dt_command')
+    events = PropDescr(ListElem, plural=True, node_cls='Dt_event')
+
+    # XXX Dt_object instances are keyed for the benefit of .h_parent
+    @classmethod
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
+        """The parent `Dt_model.ref` attribute, parent object path, and the
+        `_Dt_item.ref` attribute.
+        """
+
+        model = parent.instance_in_path(Dt_model)
+        assert model is not None
+        return model.ref, parent.objpath, dct.get('ref', '')
+
+    # noinspection PyPep8Naming
+    @property
+    @cache
+    def refNode(self) -> Union[Object, NullType]:
+        """Get the node referenced by `ref`.
+
+        Returns:
+            The referenced node, or `Null` if not found.
+        """
+
+        # the ref is relative to the containing object, command, event or
+        # model's refNode
+        # noinspection PyTypeChecker
+        node = self.instance_in_path(
+                (Dt_object, Dt_command, Dt_event, Dt_model),
+                predicate=lambda n: n is not self).refNode
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
+                                quiet=PATH_QUIET)
+
+    @property
+    @cache
+    def h_parent(self) -> Optional[Union[Dt_model, 'Dt_object']]:
+        ref = self.ref
+        assert ref is not None
+        head, _ = self._path_split(ref)
+        if head == '':
+            parent = self.parent
+        else:
+            parent_key = self.key[:-1] + (head,)
+            parent = self.find(Dt_object, *parent_key)
+            if not parent:
+                # this should only happen when there's something wrong, but
+                # it's safer and more consistent to return the model in this
+                # case (self.parent will be the model)
+                parent = self.parent
+        return parent
+
+    # XXX should try to optimize this
+    @property
+    @cache
+    def h_objects(self) -> ListElem.ListWrapper['Dt_object']:
+        model = self.instance_in_path(Dt_model)
+        assert model is not None
+        objs = ListElem.ListWrapper()
+        for obj in model.objects:
+            head, _ = self._path_split(obj.objpath)
+            if head == self.objpath:
+                objs += [obj]
+        return objs
+
+    @property
+    @cache
+    def h_elems(self) -> tuple[Node, ...]:
+        # XXX ideally the objects would be inserted in a more logical place
+        return tuple(self.elems + tuple(self.h_objects))
+
+
+# noinspection PyPep8Naming
+class Dt_parameter(_Dt_item, _Parameter):
+    access = PropDescr(EnumObjAttr, enum_cls=ParameterAccessEnum,
+                       doc='Parameter access.')
+    activeNotify = PropDescr(EnumObjAttr, enum_cls=Dt_activeNotifyEnum,
+                             doc='Parameter active notify.')
+
+    # noinspection PyPep8Naming
+    @property
+    @cache
+    def refNode(self) -> Union[Parameter, NullType]:
+        """Get the node referenced by `ref`.
+
+        Returns:
+            The referenced node, or `Null` if not found.
+        """
+
+        # the ref is relative to the containing command, event, object or
+        # model's refNode
+        node = self.instance_in_path((Dt_command, Dt_event, Dt_object,
+                                      Dt_model)).refNode
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
+                                quiet=PATH_QUIET)
+
+
+# noinspection PyPep8Naming
+class Dt_command(_Dt_item, _Command):
+    # XXX invalid node_cls isn't detected, e.g. 'Dt_Input' typo
+    input = PropDescr(SingleElem, node_cls='Dt_input',
+                      doc='Command input arguments.')
+    output = PropDescr(SingleElem, node_cls='Dt_output',
+                       doc='Command input arguments.')
+
+    # noinspection PyPep8Naming
+    @property
+    @cache
+    def refNode(self) -> Union[Command, NullType]:
+        """Get the node referenced by `ref`.
+
+        Returns:
+            The referenced node, or `Null` if not found.
+        """
+
+        # the ref is relative to the containing object's or model's refNode
+        node = self.instance_in_path((Dt_object, Dt_model)).refNode
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
+                                quiet=PATH_QUIET)
+
+    def format(self, **kwargs) -> str:
+        return super().format(**kwargs) + '.'
+
+
+# noinspection PyPep8Naming
+class _Dt_arguments(_Dt_item):
+    parameters = PropDescr(ListElem, plural=True, node_cls='Dt_parameter')
+    objects = PropDescr(ListElem, plural=True, node_cls='Dt_object')
+
+    # noinspection PyPep8Naming
+    @property
+    @cache
+    def refNode(self) -> Union[Model, NullType]:
+        """Get the node referenced by `ref`.
+
+        Returns:
+            The referenced node, or `Null` if not found.
+        """
+
+        return self.instance_in_path(Dt_command).refNode
+
+    # the refNode is the command, so can't use its .format()
+    def format(self, **kwargs) -> str:
+        return type(self).__name__.replace('Dt_', '').capitalize() + '.'
+
+
+# noinspection PyPep8Naming
+class Dt_input(_Dt_arguments, _Input):
+    pass
+
+
+# noinspection PyPep8Naming
+class Dt_output(_Dt_arguments, _Output):
+    pass
+
+
+# noinspection PyPep8Naming
+class Dt_event(_Dt_item, _Event):
+    parameters = PropDescr(ListElem, plural=True, node_cls='Dt_parameter')
+    objects = PropDescr(ListElem, plural=True, node_cls='Dt_object')
+
+    # noinspection PyPep8Naming
+    @property
+    @cache
+    def refNode(self) -> Union[Event, NullType]:
+        """Get the node referenced by `ref`.
+
+        Returns:
+            The referenced node, or `Null` if not found.
+        """
+
+        # the ref is relative to the containing object's or model's refNode
+        node = self.instance_in_path((Dt_object, Dt_model)).refNode
+        return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
+                                quiet=PATH_QUIET)
+
+    def format(self, **kwargs) -> str:
+        return super().format(**kwargs) + '.'
 
 
 # add class hierarchy

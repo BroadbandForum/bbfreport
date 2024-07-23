@@ -40,20 +40,18 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import textwrap
 
-from typing import cast, List, Optional, Union
+from typing import cast, Optional, Union
 
 from ..format import Format
-from ..node import _Base, CommandRef, Component, DataType, EventRef, Model, \
-    Object, ObjectRef, Parameter, ParameterRef, Profile, Reference, Root
+from ..logging import Logging
+from ..node import _Base, CommandRef, Component, DataType, EventRef, \
+    _HasContent, Model, Object, ObjectRef, Parameter, ParameterRef, \
+    Profile, Reference, Root
 from ..utility import Utility
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 nice_dict = Utility.nice_dict
 nice_string = Utility.nice_string
@@ -63,7 +61,7 @@ class TextFormat(Format):
     """Text report format plugin."""
 
     @classmethod
-    def _add_arguments(cls, arg_parser):
+    def _add_arguments(cls, arg_parser, **kwargs):
         default_style = 'visit'
 
         arg_group = arg_parser.add_argument_group('text report format '
@@ -112,20 +110,20 @@ class TextFormat(Format):
         self.report_generic(node, level=level, name=name)
 
     def report_root(self, root: Root, *, level: int = 0) -> None:
-        datatypes = cast(List[DataType], DataType.findall())
+        datatypes = cast(list[DataType], DataType.findall())
         root.args.output.write(
                 '%sdatatypes (%d)\n' % (self.indent(level), len(datatypes)))
         for datatype in sorted(datatypes, key=lambda d: str(d).lower()):
             self.report_datatype(datatype, level=level + 1)
 
-        references = cast(List[Reference], Reference.findall())
+        references = cast(list[Reference], Reference.findall())
         root.args.output.write(
                 '%sreferences (%d)\n' % (self.indent(level), len(references)))
         if root.args.text_list_references:
             for reference in sorted(references, key=lambda r: str(r).lower()):
                 self.report_reference(reference, level=level + 1)
 
-        components = cast(List[Component], Component.findall())
+        components = cast(list[Component], Component.findall())
         root.args.output.write(
                 '%scomponents (%d)\n' % (self.indent(level), len(components)))
         for component in sorted(components, key=lambda c: str(c).lower()):
@@ -133,7 +131,7 @@ class TextFormat(Format):
 
         # these are all models; root.models are just models defined on the
         # command line
-        models = cast(List[Model], Model.findall())
+        models = cast(list[Model], Model.findall())
         root.args.output.write(
                 '%smodels (%d)\n' % (self.indent(level), len(models)))
         for model in models:
@@ -244,7 +242,7 @@ class TextFormat(Format):
         text = ' %s' % nice_string(elem.text, maxlen=40) if elem.text else ''
         text += ' -> %s' % nice_string(
                 elem.content.markdown or '', maxlen=256) \
-            if hasattr(elem, 'content') else ''
+            if isinstance(elem, _HasContent) else ''
         line = '%s%s%s%s%s%s' % (
             prefix, self.indent(level), elem.typename, value, attrs, text)
         lines = textwrap.wrap(line, subsequent_indent=' ' * len(

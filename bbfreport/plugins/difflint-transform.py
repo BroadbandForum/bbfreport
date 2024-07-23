@@ -45,9 +45,13 @@
 
 # XXX there should be more checks
 
-from typing import List, Optional, Tuple
+from typing import Optional
 
-from bbfreport.node import _Base, Model, _ModelItem, _ValueFacet, Version
+from bbfreport.node import _Base, Model, _ModelItem, _ProfileItem, \
+    _ValueFacet, Version
+
+FIRST_USP_VERSION = Version((2, 12, 0))
+FIRST_COMPONENT_CLAMP_VERSION = Version((2, 16, 0))
 
 
 # need two files on the command line
@@ -65,10 +69,13 @@ models = {}
 
 # need to be able to supply the key because value facets aren't keyed
 def save_node(node: _Base, *,
-              key: Optional[Tuple[str, ...]] = None) -> None:
+              key: Optional[tuple[str, ...]] = None) -> None:
     if key is None:
         key = node.key
-    assert key is not None and len(key) > 1
+
+    # for example, uniqueKey parameterRef is unkeyed
+    if key is None or len(key) < 2:
+        return
 
     key = (key[0], key[1:])
 
@@ -77,6 +84,10 @@ def save_node(node: _Base, *,
 
 
 def visit__model_item(item: _ModelItem):
+    save_node(item)
+
+
+def visit__profile_item(item: _ProfileItem):
     save_node(item)
 
 
@@ -92,25 +103,28 @@ def _end_(_, logger):
     def version(nod: _Base) -> Optional[Version]:
         return nod.version or nod.dmr_version
 
-    # note use of object_version_inherited; also, for USP Device:2, clamp the
+    # note use of h_version_inherited; also, for USP Device:2, clamp the
     # version to 2.12 (this is necessary for pre-2.16 models that don't
     # clamp the version via component references)
+    # XXX it might no longer be necessary because, from 2.18, component
+    #     references default the clamp version to the current version
     def version_inherited(nod: _Base) -> Version:
-        inherited = nod.object_version_inherited
-        assert inherited is not None
+        inherited = nod.h_version_inherited
+        assert inherited is not None, '%s: no inherited version' % nod.nicepath
         if (model := nod.model_in_path) and model.usp and \
                 model.keylast == 'Device:2' and \
-                inherited.comps < (2, 12, 0):
-            inherited = Version((2, 12, 0))
+                model.model_version < FIRST_COMPONENT_CLAMP_VERSION and \
+                inherited < FIRST_USP_VERSION:
+            inherited = FIRST_USP_VERSION
         return inherited
 
     # this returns the parent first; is this the best order? I think so
     # XXX this could be a standard method / property?
-    def ancestors(nod: _Base) -> List[_Base]:
+    def ancestors(nod: _Base) -> list[_Base]:
         return ([nod.parent] + ancestors(nod.parent)) if nod.parent else []
 
     # two models should have been collected
-    assert len(models) == 2
+    assert len(models) == 2, '%d model supplied (need 2)' % len(models)
     old, new = models.values()
 
     # determine the old and new model versions (actually old and new should
@@ -135,11 +149,14 @@ def _end_(_, logger):
     changed_sorted = {key: node for key, node in sorted(
             changed.items(), key=lambda item: item[0])}
 
-    # determine invalid version changes
-    # XXX aren't these all of them?
-    changed_errors = {key: node for key, node in changed_sorted.items() if
-                      version_inherited(node[NEW]) !=
-                      version_inherited(node[OLD])}
+    # determine version changes (decreased and increased versions are
+    # reported separately)
+    decreased_errors = {key: node for key, node in changed_sorted.items() if
+                        version_inherited(node[NEW]) <
+                        version_inherited(node[OLD])}
+    increased_errors = {key: node for key, node in changed_sorted.items() if
+                        version_inherited(node[NEW]) >
+                        version_inherited(node[OLD])}
 
     # get nodes that have been added in the new model
     added_keys = set(new.keys()) - set(old.keys())
@@ -147,29 +164,55 @@ def _end_(_, logger):
     added_sorted = {key: node for key, node in sorted(
             added.items(), key=lambda item: item[0])}
 
+    # get nodes that have been removed in the new model
+    removed_keys = set(old.keys()) - set(new.keys())
+    removed = {key: old[key] for key in removed_keys}
+    removed_sorted = {key: node for key, node in sorted(
+            removed.items(), key=lambda item: item[0])}
+
+    # report 'removed' errors
+    for key, node in removed_sorted.items():
+        context_node = node.instance_in_path((_ModelItem, _ProfileItem))
+        node_value = ' %s' % node.value if isinstance(node,
+                                                      _ValueFacet) else ''
+        logger.warning('%s: %s%s removed; should instead mark as '
+                       'deprecated' % (
+                           context_node.nicepath, node.elemname, node_value))
+
     # determine missing and invalid versions (this can give spurious results
     # if comparing non-adjacent versions)
     missing_errors = {key: node for key, node in added_sorted.items() if
+                      not isinstance(node, _ProfileItem) and
                       version(node) is None and version_inherited(
                               node) < new_version}
     invalid_errors = {key: node for key, node in added_sorted.items() if
+                      not isinstance(node, _ProfileItem) and
                       version(node) is not None and version(
                               node) < new_version}
 
     # if a node has an error, there's no point complaining about its children
-    nodes_with_errors = set(changed_errors.values()) | set(
+    # (we ignore increased_errors here; they're not reported as warnings)
+    nodes_with_errors = set(decreased_errors.values()) | set(
             missing_errors.values()) | set(invalid_errors.values())
     missing_errors = {key: node for key, node in missing_errors.items() if
                       not any(ancestor in nodes_with_errors for ancestor in
                               ancestors(node))}
 
-    # report 'changed' errors
-    for key, node in changed_errors.items():
-        logger.warning('%s: invalid version change from %s (in %s) to %s (in '
-                       '%s)' % (
+    # report 'decreased' and 'increased' errors (we always report cases where
+    # the version decreased, e.g., to catch missing clamp versions, but not
+    # where it increased, which is assumed to be to fix a previous error)
+    for key, node in decreased_errors.items():
+        logger.warning('%s: version decreased from %s (in %s) to %s '
+                       '(in %s)' % (
                            node[NEW].nicepath, version_inherited(node[OLD]),
                            old_version, version_inherited(node[NEW]),
-                           new_version,))
+                           new_version))
+    for key, node in increased_errors.items():
+        logger.info('%s: version increased from %s (in %s) to %s '
+                    '(in %s)' % (
+                        node[NEW].nicepath, version_inherited(node[OLD]),
+                        old_version, version_inherited(node[NEW]),
+                        new_version))
 
     # report 'missing' errors
     for key, node in missing_errors.items():
@@ -180,3 +223,23 @@ def _end_(_, logger):
     for key, node in invalid_errors.items():
         logger.warning('%s: invalid version %s (added in %s)' % (
             node.nicepath, version(node), new_version))
+
+    # report invalid profile items (items added to existing profiles)
+    profile_errors = {key: node for key, node in added_sorted.items() if
+                      isinstance(node, _ProfileItem) and
+                      version_inherited(node) < new_version}
+    for key, node in profile_errors.items():
+        logger.warning(
+                "%s: can't add %s to existing profile (defined in %s)" % (
+                    node.nicepath, node.elemname, version_inherited(node)))
+
+    # report changed profile requirements
+    profile_keys = {key for key in common_keys if
+                    isinstance(new[key], _ProfileItem) and new[
+                        key].requirement != old[key].requirement}
+    for key in sorted(profile_keys):
+        old_node, new_node = old[key], new[key]
+        logger.warning("%s: can't change profile requirement from %s (defined "
+                       "in %s) to %s" % (
+                           new_node.nicepath, old_node.requirement,
+                           version_inherited(old_node), new_node.requirement))

@@ -47,8 +47,8 @@ Note:
 
 import xmltodict
 
-from ..parser import Data, Parser
-from ..utility import Utility
+from ...parser import Data, Parser
+from ...utility import Utility
 
 # XXX maybe shouldn't use this, because it doesn't preserve 'choice' order,
 #     e.g. [component, parameter, component] will be collected by
@@ -59,9 +59,8 @@ from ..utility import Utility
 
 
 class XmltodictParser(Parser):
-    def _parse(self, path: str, *, warn_tabs: bool = False,
-               smart_cdata: bool = False,
-               expand_entities: bool = False) -> Data:
+    @staticmethod
+    def _parse(path: str, **_kwargs) -> Data:
         # parse the file to a dictionary
         # XXX should check that there are no attribute/element name
         #     conflicts; the '#' prefix might actually be good?

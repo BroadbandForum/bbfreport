@@ -1,6 +1,6 @@
 """Visitor pattern support (for transforms and output formats)."""
 
-# Copyright (c) 2019-2021, Broadband Forum
+# Copyright (c) 2019-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -41,28 +41,23 @@
 # license grant are also deemed granted under this license.
 
 import inspect
-import logging
-import os.path
 import re
 
-from typing import Any, Callable, cast, Dict, List, Optional, Tuple, Type, \
+from types import ModuleType
+
+from typing import Any, Callable, cast, Optional, \
     Union
 
+from .layout import Doc
+from .logging import Logging
 from .node import _Accessor, _Node, Node, NodeOrMixinType, Root, varname
 from .plugin import Plugin
 from .utility import Utility
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 lower_first = Utility.lower_first
 
-
-# XXX using lower-case typenames isn't enough because you can't write an
-#     'object' method!; should allow actual typename and/or a leading
-#     or trailing underscore, plus should implement a consistent naming policy
 
 # XXX need to make this to do more useful stuff
 # XXX defaults give backwards compatible behavior
@@ -115,6 +110,9 @@ class Rules:
                   'profile'),
         'object': ('description', 'uniqueKey', 'parameter'),
         'syntax': ('list', 'string'),
+        'input': ('description', 'parameter', 'object', 'componentRef'),
+        'output': ('description', 'parameter', 'object', 'componentRef'),
+        'event': ('description', 'parameter', 'object', 'componentRef'),
         'profile': ('description', 'parameterRef', 'objectRef')
     }
     """Default node typename groups, determining the order in which nodes
@@ -126,11 +124,13 @@ class Rules:
     :meta hide-value:"""
     # XXX :meta hide-value: (above) doesn't seem to be working?
 
-    def __init__(self, *, globs: Optional[Tuple[str, ...]] = None,
-                 ignore: Optional[Tuple[str, ...]] = None,
-                 stop: Optional[Tuple[str, ...]] = None,
-                 order: Optional[Dict[str, Tuple[str, ...]]] = None,
-                 thisonly: bool = False):
+    def __init__(self, *, globs: Optional[tuple[str, ...]] = None,
+                 ignore: Optional[tuple[str, ...]] = None,
+                 stop: Optional[tuple[str, ...]] = None,
+                 order: Optional[dict[str, tuple[str, ...]]] = None,
+                 hierarchical: Optional[bool] = None,
+                 depth_first: Optional[bool] = None,
+                 thisonly: Optional[bool] = None):
         """Rules constructor.
 
         Args:
@@ -165,24 +165,53 @@ class Rules:
         # XXX should merge more intelligently? no?
         self._order = order if order is not None else self.default_order
 
+        # others
+        self._hierarchical = hierarchical
+        self._depth_first = depth_first
+
+    # XXX this is a hack
+    def update(self, options: dict[str, bool]) -> None:
+        for key, value in options.items():
+            attr = key.replace('-', '_')
+            assert hasattr(self, attr)
+            setattr(self, attr, value)
+
     @property
-    def globs(self) -> Tuple[str, ...]:
+    def globs(self) -> tuple[str, ...]:
         return self._globs
 
     @property
-    def ignore(self) -> Tuple[str, ...]:
+    def ignore(self) -> tuple[str, ...]:
         """Typenames to ignore."""
         return self._ignore
 
     @property
-    def stop(self) -> Tuple[str, ...]:
+    def stop(self) -> tuple[str, ...]:
         """Typenames at which to stop."""
         return self._stop
 
     @property
-    def order(self) -> Dict[str, Tuple[str, ...]]:
+    def order(self) -> dict[str, tuple[str, ...]]:
         """Dictionary mapping typename to typenames."""
         return self._order
+
+    @property
+    def hierarchical(self) -> Optional[bool]:
+        return self._hierarchical
+
+    @hierarchical.setter
+    def hierarchical(self, value: bool) -> None:
+        assert isinstance(value, bool)
+        self._hierarchical = value
+
+    @property
+    def depth_first(self) -> Optional[bool]:
+        return self._depth_first
+
+    @depth_first.setter
+    def depth_first(self, value: bool) -> None:
+        assert isinstance(value, bool)
+        self._depth_first = value
 
     def __str__(self):
         return 'globs %r ignore %r stop %r' % (self._globs, self._ignore,
@@ -196,9 +225,38 @@ class Visitor(Plugin):
     """Visitor pattern class (for transforms and output formats).
     """
 
+    most_specific_only: bool = False
+    """Whether `Visitor._visit_node` should call only the most specific
+    method (appropriate for formats) or should call all matching methods."""
+
+    # known method patterns and names
+
+    # the dict value is the 'no_node_arg' flag
+    special_pattern = re.compile(r'^_[a-z]\w*_$')
+    special_methods = {'_init_': True, '_post_init_': True, '_begin_': False,
+                       '_pre_elems_': False, '_pre_group_': False,
+                       '_post_group_': False, '_post_elems_': False,
+                       '_end_': False}
+
+    # XXX for now, this allows a deprecated initial underscores
+    known_pattern = re.compile(r'^_visit_\w*[a-z0-9]$')
+    known_methods = {'_visit_begin', '_visit_node', '_visit_pre_elems',
+                     '_visit_pre_group', '_visit_post_group',
+                     '_visit_post_elems', '_visit_end'}
+
+    visit_pattern = re.compile(r'^_?visit_\w*[a-z0-9]$')
+
+    extra_pattern = re.compile(r'^visit$')
+    extra_methods = {'visit'}
+
+    @classmethod
+    def is_known_method_name(cls, name: str) -> bool:
+        return super().is_known_method_name(name) or name in (
+                set(cls.special_methods) | cls.known_methods |
+                cls.extra_methods)
+
     def __init__(self, name: Optional[str] = None, *,
-                 plugindirs: Optional[List[str]] = None,
-                 internal: bool = False, **kwargs):
+                 module: Optional[ModuleType] = None, **kwargs):
         """Visitor constructor.
 
         The primary purpose of the constructor is to populate a node class
@@ -207,23 +265,23 @@ class Visitor(Plugin):
         implemented its own version of `Visitor._visit_node()`.
         """
 
-        super().__init__(name)
+        if module:
+            name, _ = self.get_name_and_type(
+                    self.get_canonical_name(module.__name__))
+        super().__init__(name, **kwargs)
 
-        # XXX this should be a reusable utility (note the different algorithm
-        #     for deriving the logger name)
-        # XXX should only create a logger for xxx.py loggers?
-        logger_name_ = str(self).split('.')[0]
-        self.logger = logging.getLogger(logger_name_)
-        self.logger.addFilter(
-            lambda r: r.levelno > 20 or logger_name_ in Utility.logger_names)
+        # create a logger
+        # XXX should only create loggers for xxx.py loggers (old-style loggers
+        #     create their own)
+        self.logger = Logging.get_logger(str(self))
 
         # node type name to (method, arg_names, kwarg_names) map
         # (it's actually keyed by varname(node_class))
         # XXX will change this lower-case rule
-        self._method_map: Dict[str, Tuple[Callable, List[str], List[str]]] = {}
+        self._method_map: dict[str, tuple[Callable, list[str], list[str]]] = {}
 
         # node type to method vname list (in MRO order) map
-        self._type_map: Dict[Type, List[str]] = {}
+        self._type_map: dict[type, list[str]] = {}
 
         # does the plugin implement _visit_node()? if so, there's no need to
         # populate the method map
@@ -231,16 +289,19 @@ class Visitor(Plugin):
         if implements:
             pass
 
-        # otherwise, there are two cases for populating the method map:
-        # - if name is not specified, this is a subclass that implements
-        #   visit_parameter() etc. methods
-        elif name is None:
-            self.__init_subclass()
+        # XXX clean this up to use inspect, and perhaps to avoid special
+        #     (and extra? check) methods in the 'class' case
 
-        # - if name is specified, it's a python file that directly implements
-        #   visit_parameter() etc. functions
+        # otherwise, there are two cases for populating the method map:
+        # - if module is not specified, this is a subclass that implements
+        #   visit_parameter() etc. methods
+        elif module is None:
+            self.__init_method_map(type(self).__dict__)
+
+        # - if module is specified, this is a python module that directly
+        #   implements visit_parameter() etc. functions
         else:
-            self.__init_pyfile(name, plugindirs=plugindirs, internal=internal)
+            self.__init_method_map(module.__dict__)
 
         # finally, populate the type map, which is just an optimization to
         # avoid needing to use the MRO when visiting each node
@@ -249,126 +310,90 @@ class Visitor(Plugin):
         # invoke the standalone _init_() function if defined
         self._invoke('_init_', **kwargs)
 
-    def __init_subclass(self) -> None:
-        self.__init_method_map(type(self).__dict__, subclass=True)
+    # the term 'method' is used loosely; in fact we check for 'routines',
+    # which could be functions or methods
+    def __init_method_map(self, dct: dict[str, Any]) -> None:
+        cls = type(self)
 
-    def __init_pyfile(self, file: str, *,
-                      plugindirs: Optional[List[str]] = None,
-                      internal: bool = False) -> None:
-        # the file must be a python source file
-        # XXX shouldn't really call them plain xxx.py, but just calling them
-        #     xxxTransform.py would interfere with automatic plugin scanning
-        name, ext = os.path.splitext(file)
-        if ext and ext != '.py':
-            logger.error('%s file %s is not a python source file' % (
-                type(self).__name__, file))
-            return
-        file = name + '.py'
-
-        # import the file (as a module)
-        _, sys_path_save = Plugin.push_plugindirs(plugindirs)
-        module = Plugin.import_one(file)
-        Plugin.pop_plugindirs(sys_path_save)
-        if module is None:
-            logger.error('failed to import %s from %s' % (file, plugindirs))
-            return
-
-        func = logger.debug if internal else logger.info
-        func('imported %s from %s' % (module.__name__, module.__file__))
-
-        # populate the method map
-        self.__init_method_map(module.__dict__, subclass=False)
-
-    def __init_method_map(self, dct: Dict[str, Any], *,
-                          subclass: bool = False) -> None:
-        # extra provides additional special functions to be searched for
-        # (it's used for adding the visit() function)
-        extra = {'visit'}
-
-        # collect all special _xxx_() functions (they're not methods); the
-        # dict value is the 'no_node_arg' flag
-        special = {'_init_': True, '_post_init_': True, '_begin_': False,
-                   '_pre_elems_': False, '_pre_group_': False, '_post_group_':
-                       False, '_post_elems_': False, '_end_': False}
+        # all methods that match one of the above patterns
         methods = {n: v for n, v in dct.items() if
-                   not (subclass and (re.match(r'^__\w+__$', n) or
-                                      re.match(r'^_visit_', n))) and
-                   (re.match(r'^_\w+_$', n) or n in extra) and
-                   inspect.isroutine(v)}
+                   (cls.special_pattern.match(n) or
+                    cls.known_pattern.match(n) or
+                    cls.visit_pattern.match(n) or
+                    cls.extra_pattern.match(n)) and inspect.isroutine(v)}
+        if len(methods) == 0:
+            logger.warning('%s %s defines no recognized methods' % (
+                self, type(self).__name__.lower()))
+
         for method_name, method in methods.items():
-            if method_name not in set(special) | extra:
-                logger.warning("%s.%s() isn't one of the known special "
-                               "methods %s" % (
-                                   self, method_name, ', '.join(special)))
+            # vname (varname) is the method map key (it might be changed below)
+            vname = method_name
+
+            # warn of unknown special methods _begin_() etc.
+            if cls.special_pattern.match(method_name) and \
+                    not cls.is_known_method_name(method_name):
+                logger.warning('%s.%s() is unknown and will be ignored' % (
+                    self, method_name))
                 continue
 
+            # warn of unexpected visit methods _visit_xxx() etc.
+            if (cls.known_pattern.match(method_name) or
+                cls.visit_pattern.match(method_name)) and \
+                    not cls.is_known_method_name(method_name):
+                typename = re.sub(r'^_?visit_', r'', method_name)
+                node_class = _Node.typenamed(typename)
+                if node_class is None:
+                    logger.warning("%s.%s() doesn't correspond to a node or "
+                                   "mixin class" % (self, method_name))
+                    continue
+
+                # XXX can't have multiple methods with the same varname
+                vname = varname(node_class)
+                if vname in self._method_map:
+                    existing = self._method_map[vname][0].__name__
+                    logger.warning('%s.%s() duplicates %s() and will be '
+                                   'ignored' % (self, method_name, existing))
+                    continue
+
+                # XXX prefer visit_data_type(); allow visit_DataType() for now
+                if typename != vname:
+                    # XXX if multiple versions exist, only the first will be
+                    #     called; should keep a list keyed by vname
+                    logger.warning('%s.%s() is deprecated; please rename as '
+                                   'visit_%s()' % (self, method_name, vname))
+
+                # XXX prefer visit_xxx() but allow _visit_xxx() for now
+                elif method_name.startswith('_'):
+                    logger.warning('%s.%s() is deprecated; please rename as '
+                                   '%s()' % (self, method_name,
+                                             method_name[1:]))
+
+            # get the method args
+            no_node_arg = cls.special_methods.get(method_name, False)
             arg_names, kwarg_names = self.__init_method_args(
-                    method, no_node_arg=special.get(method_name, False))
-            self._method_map[method_name] = (method, arg_names, kwarg_names)
-
-        # collect all [_]visit_xxx() methods; use isroutine() rather than
-        # ismethod() because ismethod() checks only for _bound_ methods
-        # XXX if we don't look for _visit_xxx() methods, this could be simpler
-        known = {'_visit_begin', '_visit_node', '_visit_pre_elems',
-                 '_visit_pre_group', '_visit_post_group', '_visit_post_elems',
-                 '_visit_end'}
-        methods = {n: v for n, v in dct.items() if
-                   re.match(r'_?visit_', n) and
-                   inspect.isroutine(v) and n not in known}
-
-        # check that they all correspond to known node or mixin classes
-        for method_name, method in methods.items():
-            typename = re.sub(r'^_?visit_', r'', method_name)
-            node_class = _Node.typenamed(typename)
-            if node_class is None:
-                logger.warning("%s.%s() doesn't correspond to a node or "
-                               "mixin class" % (self, method_name))
-                continue
-
-            # XXX can't have multiple methods with the same varname
-            # XXX should use 'visit_<vname>' so the names are the same as
-            #     the function names in the standalone case, e.g., lint.py
-            #     ('_begin_' and '_base' look a bit similar)
-            vname = varname(node_class)
-            if vname in self._method_map:
-                logger.warning("%s.%s() duplicates %s() and will be ignored"
-                               % (self, method_name,
-                                  self._method_map[vname][0].__name__))
-                continue
-
-            # XXX prefer visit_data_type() but allow visit_DataType() for now
-            if typename != vname:
-                # XXX more importantly, if multiple versions exist only the
-                #     first will be called! should keep a list keyed by vname
-                logger.warning("%s.%s() is deprecated; please rename it as "
-                               "visit_%s()" % (self, method_name, vname))
-
-            # XXX prefer visit_xxx() but allow _visit_xxx() for now
-            if method_name.startswith('_'):
-                logger.warning("%s.%s() method name is deprecated; please "
-                               "rename it as %s()" % (self, method_name,
-                                                      method_name[1:]))
+                    method, no_node_arg=no_node_arg)
+            extra = ', *, %s' % ', '.join(kwarg_names) if kwarg_names else ''
+            logger.info('recognized %s.%s(%s%s) method' % (
+                self, method_name, ', '.join(arg_names), extra))
 
             # allow static and class methods to be supported; see
             # https://stackoverflow.com/questions/41921255
             if not inspect.isfunction(method):
                 method = method.__func__
 
-            # get the method arg names
-            arg_names, kwarg_names = self.__init_method_args(method)
-
             # update the method map
             self._method_map[vname] = (method, arg_names, kwarg_names)
 
     @staticmethod
     def __init_method_args(method: Callable, *, no_node_arg: bool = False) -> \
-            Tuple[List[str], List[str]]:
+            tuple[list[str], list[str]]:
         # known method argument names (assumes conventional use of 'cls' and
         # 'self' for class and instance arguments); the node argument is
         # assumed to be the first positional argument after 'cls' and 'self'
         # (if present); it can be called anything (other that 'cls' etc.)
         known_arg_names = ['cls', 'self', 'node']
-        known_kwarg_names = ['level', 'state', 'rules', 'args', 'logger']
+        known_kwarg_names = ['level', 'state', 'rules', 'args', 'logger',
+                             'name']
 
         seen_node = False
         arg_names = []
@@ -422,7 +447,8 @@ class Visitor(Plugin):
 
     def visit(self, node: Node, *, level: int = 0,
               rules: Optional[Rules] = None, state: Optional[Any] = None,
-              omit_if_unused: bool = False, **kwargs) -> None:
+              body: Optional[Doc] = None, omit_if_unused: bool = False,
+              **kwargs) -> Optional[Union[Doc, str]]:
         """Visit a node and its children.
 
         This is called for all nodes at all levels of the node tree. It
@@ -455,6 +481,7 @@ class Visitor(Plugin):
                 caller but, if not, are constructed by creating a `Rules`
                 instance with ``thisonly=node.args.thisonly``.
             state: Opaque state object.
+            body: Node body.
             omit_if_unused: Whether to omit unused nodes.
             **kwargs: Additional keyword arguments. These are passed to all
                 ``_visit_xxx()`` methods.
@@ -471,10 +498,10 @@ class Visitor(Plugin):
         if state is None:
             state = {}
 
-        # XXX many transforms and formats will be of the simple <xxx.py>
-        #     style, and so won't implement _visit_begin(); need a better way
-        #     for them to control things, e.g., so visit_root() can choose to
-        #     abort node traversal
+        # XXX body is perhaps only useful for depth-first traversal?
+        if body is None:
+            body = Doc()
+        body_ = Doc()
 
         # don't use level, because it can be zero if top-level node is ignored
         # XXX it might be better to call it only on Root objects
@@ -483,88 +510,133 @@ class Visitor(Plugin):
 
             # invoke the standalone visit() function if defined
             if 'visit' in self._method_map:
-                return self._invoke('visit', node=root, args=root.args,
-                                    omit_if_unused=omit_if_unused, **kwargs)
+                return self._invoke(
+                        'visit', node=root, args=root.args, rules=rules,
+                        state=state, body=body, omit_if_unused=omit_if_unused,
+                        **kwargs)
 
             # _visit_begin() can return True to suppress the report
-            retval = self._visit_begin(root, rules=rules, state=state,
-                                       omit_if_unused=omit_if_unused, **kwargs)
-            if isinstance(retval, bool):
+            retval = self._visit_begin(
+                    root, rules=rules, state=state, body=body,
+                    omit_if_unused=omit_if_unused, **kwargs)
+            # None is ignored
+            if retval is None:
+                pass
+            # bool True means 'stop'
+            elif isinstance(retval, bool):
                 if retval:
                     return
-            # otherwise it can return rules
+            # Doc updates the body
+            elif isinstance(retval, Doc):
+                body_ += retval
+            # dict updates the rules
+            elif isinstance(retval, dict):
+                rules.update(retval)
+            # Rules replaces the rules
             elif isinstance(retval, Rules):
                 rules = retval
-            # XXX otherwise should be an error?
+            else:
+                # XXX the message assumes _begin_(); not _visit_begin()
+                logger.error('%s._begin_() returned unexpected type %s %r'
+                             % (self, type(retval).__name__, retval))
+                return
 
         # note that 'node.is_used is False' excludes 'node.is_used is None',
         # and that we don't check node.args.all here because it presumably
         # determined omit_if_unused in the first place
-        # XXX do we need to provide control over whether this is called
-        #     before or after its children?
         typename = node.typename
         is_hidden = node.is_hidden
         ignore = typename in rules.ignore or \
             (omit_if_unused and node.is_used is False)
+        # transforms always visit components
+        # XXX have to check the name rather than use isinstance() because
+        #     importing transform would be circular; this logic should be
+        #     integrated into Rules
+        if typename == 'component' and type(self).__name__ == 'Transform':
+            ignore = False
         stop = typename in rules.stop
-        retval = self._visit_node(node, level=level, rules=rules, state=state,
-                                  omit_if_unused=omit_if_unused, **kwargs) \
-            if not is_hidden and not ignore else None
 
-        # backwards compatibility: if retval is a tuple, assume that it's
-        # (ignore, stop, _)
-        # XXX used to support state as the third item but this was error-prone
-        #     because it replaced state with a new variable
-        # XXX should also support just ignore, or ignore and stop?
-        if isinstance(retval, tuple):
-            assert len(retval) == 3
-            ignore, stop, _ = retval
-        elif retval is not None:
-            # XXX will get rid of this once it's safe to do so
-            assert False, '_visit_node() returned no-longer-supported %r' % \
-                          retval
+        # only if not depth-first
+        if not rules.depth_first and not is_hidden and not ignore:
+            retval = self._visit_node(
+                    node, level=level, rules=rules, state=state, body=body,
+                    omit_if_unused=omit_if_unused, **kwargs)
+            # None is ignored
+            if retval is None:
+                pass
+            # backwards compatibility: if retval is a tuple, assume that it's
+            # (ignore, stop, _)
+            # XXX we used to support state as the third item but this was
+            #     error-prone because it replaced state with a new variable
+            # XXX should also support just ignore, or ignore and stop?
+            elif isinstance(retval, tuple):
+                assert len(retval) == 3
+                ignore, stop, _ = retval
+            # Doc updates the body (probably only useful for depth-first)
+            elif isinstance(retval, Doc):
+                body_ += retval
+            else:
+                # XXX the message assumes visit_xxx(), not _visit_node()
+                logger.error('%s.visit_xxx() returned unexpected type %s %r'
+                             % (self, type(retval).__name__, retval))
 
         # note that this is called even if stopping
-        self._visit_pre_elems(node, level=level, rules=rules, state=state,
-                              omit_if_unused=omit_if_unused, **kwargs)
+        body_ += self._visit_pre_elems(
+                node, level=level, rules=rules, state=state, body=body,
+                omit_if_unused=omit_if_unused, **kwargs)
 
         if not is_hidden and not stop:
             level1 = level + (0 if ignore else 1)
 
-            groups = self.__groups(node, rules=rules)
+            groups = self.get_groups(node, rules=rules)
             for groupname, group in groups.items():
 
                 if groupname:
-                    self._visit_pre_group(node, groupname, level=level1,
-                                          rules=rules, state=state,
-                                          omit_if_unused=omit_if_unused,
-                                          **kwargs)
+                    body_ += self._visit_pre_group(
+                            node, groupname, level=level1, rules=rules,
+                            state=state, body=body,
+                            omit_if_unused=omit_if_unused, **kwargs)
 
                 for elem in group:
-                    self.visit(elem, level=level1, rules=rules, state=state,
-                               omit_if_unused=omit_if_unused, **kwargs)
+                    body_ += self.visit(
+                            elem, level=level1, rules=rules, state=state,
+                            body=body, omit_if_unused=omit_if_unused, **kwargs)
 
                 if groupname:
                     # this is the overrideable method
-                    self._visit_post_group(node, groupname, level=level1,
-                                           rules=rules, state=state,
-                                           omit_if_unused=omit_if_unused,
-                                           **kwargs)
+                    body_ += self._visit_post_group(
+                            node, groupname, level=level1, rules=rules,
+                            state=state, body=body,
+                            omit_if_unused=omit_if_unused, **kwargs)
+
                     # this is an internal method that contains accessor logic
-                    self.__visit_post_group(node, groupname, level=level1,
-                                            rules=rules, state=state,
-                                            omit_if_unused=omit_if_unused,
-                                            **kwargs)
+                    body_ += self.__visit_post_group(
+                            node, groupname, level=level1, rules=rules,
+                            state=state, body=body,
+                            omit_if_unused=omit_if_unused, **kwargs)
 
         # note that this is called even if stopping
-        self._visit_post_elems(node, level=level, rules=rules,
-                               state=state, omit_if_unused=omit_if_unused,
-                               **kwargs)
+        body_ += self._visit_post_elems(
+                node, level=level, rules=rules, state=state, body=body,
+                omit_if_unused=omit_if_unused, **kwargs)
+
+        # only if depth-first (note that this is called even if stopping)
+        if rules.depth_first and not is_hidden and not ignore:
+            retval = self._visit_node(node, level=level, rules=rules,
+                                      state=state, body=body_,
+                                      omit_if_unused=omit_if_unused, **kwargs)
+            if retval is not None:
+                body_ = retval
 
         # XXX see note to _visit_end(); should call only on Root?
         if node.parent is None:
-            self._visit_end(cast(Root, node), rules=rules, state=state,
-                            omit_if_unused=omit_if_unused, **kwargs)
+            retval = self._visit_end(cast(Root, node), rules=rules,
+                                     state=state, body=body_,
+                                     omit_if_unused=omit_if_unused, **kwargs)
+            if retval is not None:
+                body_ = retval
+
+        return body_
 
     # XXX need to review these callbacks; right ones? too few? too many?
 
@@ -584,18 +656,13 @@ class Visitor(Plugin):
         """
 
         # invoke the standalone _begin_() function if defined
-        retval = self._invoke('_begin_', node=root, args=root.args, **kwargs)
-        if isinstance(retval, bool):
-            return retval
-
-        # don't return True by default because that would require all plugins
-        # to implement this method
-        return False
+        return self._invoke('_begin_', node=root, args=root.args, **kwargs)
 
     # XXX the 'Returns' section is incorrect; need to sort out state
     def _visit_node(self, node: Node, *, level: int = 0,
                     rules: Optional[Rules] = None, state: Optional[Any] = None,
-                    **kwargs) -> None:
+                    body: Optional[Doc] = None, **kwargs) \
+            -> Optional[Union[Doc, str]]:
         """Visitor method called to visit each node.
 
         The default implementation calls the most specific defined
@@ -626,18 +693,21 @@ class Visitor(Plugin):
             ``(ignore, stop, state)`` tuple.
         """
 
-        # _invoke() adds the 'cls', 'self' and 'logger' known args
+        # _invoke() adds the 'cls', 'self', 'logger' etc. known args
         known_args = {'node': node, 'level': level, 'rules': rules,
-                      'state': state, 'args': node.args} | kwargs
+                      'state': state, 'body': body, 'args': node.args} | kwargs
 
         retval = None
         for vname in self._type_map.get(type(node), []):
             retval = self._invoke(vname, **known_args)
+            if self.most_specific_only:
+                break
         return retval
 
     def _visit_pre_elems(self, node: Node, *, level: int = 0,
                          rules: Optional[Rules] = None, state: Any = None,
-                         **kwargs) -> None:
+                         body: Optional[Doc] = None,
+                         **kwargs) -> Optional[Union[Doc, str]]:
         """Visitor method called before visiting each node's child nodes.
 
         The default implementation does nothing.
@@ -651,12 +721,13 @@ class Visitor(Plugin):
         """
 
         # invoke the standalone _pre_elems_() function if defined
-        self._invoke('_pre_elems_', node, level=level, rules=rules,
-                     state=state, args=node.args, **kwargs)
+        return self._invoke('_pre_elems_', node=node, level=level, rules=rules,
+                            state=state, body=body, args=node.args, **kwargs)
 
     def _visit_pre_group(self, node: Node, groupname: str, *, level: int = 0,
                          rules: Optional[Rules] = None, state: Any = None,
-                         **kwargs) -> None:
+                         body: Optional[Doc] = None,
+                         **kwargs) -> Optional[Union[Doc, str]]:
         """Visitor method called before visiting each group's nodes.
 
         Each node's child nodes are split into groups based on the
@@ -675,12 +746,15 @@ class Visitor(Plugin):
         """
 
         # invoke the standalone _pre_group_() function if defined
-        self._invoke('_pre_group_', node, groupname, level=level,
-                     rules=rules, state=state, args=node.args, **kwargs)
+        return self._invoke('_pre_group_', node, groupname, level=level,
+                            rules=rules, state=state, body=body,
+                            args=node.args, **kwargs)
 
     def _visit_post_group(self, node: Node, groupname: str, *, level: int = 0,
                           rules: Optional[Rules] = None, state: Any = None,
-                          omit_if_unused: bool = False, **kwargs) -> None:
+                          body: Optional[Doc] = None,
+                          omit_if_unused: bool = False,
+                          **kwargs) -> Optional[Union[Doc, str]]:
         """Visitor method called after visiting each group's nodes.
 
         Each node's child nodes are split into groups based on the
@@ -697,24 +771,32 @@ class Visitor(Plugin):
         """
 
         # invoke the standalone _post_group_() function if defined
-        self._invoke('_post_group_', node, groupname, level=level, rules=rules,
-                     state=state, omit_if_unused=omit_if_unused,
-                     args=node.args, **kwargs)
+        return self._invoke('_post_group_', node, groupname, level=level,
+                            rules=rules, state=state, body=body,
+                            omit_if_unused=omit_if_unused, args=node.args,
+                            **kwargs)
 
     # internal version that's called just after the above; uses accessors to
     # visit global items
     # noinspection PyUnusedLocal
     def __visit_post_group(self, node: Node, groupname: str, *, level: int = 0,
                            rules: Optional[Rules] = None, state: Any = None,
-                           omit_if_unused: bool = False, **kwargs) -> None:
+                           body: Optional[Doc] = None,
+                           omit_if_unused: bool = False, **kwargs) -> \
+            Optional[Doc]:
         # ignore if this isn't one of the typenames for which to generate
         # global lists
         if groupname not in rules.default_globs:
-            return
+            return None
+
+        if body is None:
+            body = Doc()
+        body_ = Doc()
 
         # XXX experimental logic moved from xmlFormat.py; need explanation!
         from .format import Format
-        rules = Rules(thisonly=True)
+        rules = Rules(thisonly=True, hierarchical=rules.hierarchical,
+                      depth_first=rules.depth_first)
         omit_if_unused = not node.args.all and isinstance(self, Format)
 
         # try to find the corresponding accessor class
@@ -729,19 +811,25 @@ class Visitor(Plugin):
                 #     generating XML (this isn't the right way to do it!)
                 if groupname != 'dataType' or self.name() != 'xml' or  \
                         not re.match(r'^[a-z]', name):
-                    self.visit(instance, level=level, rules=rules, state=state,
-                               omit_if_unused=omit_if_unused, name=name,
-                               **kwargs)
+                    body_ += self.visit(
+                            instance, level=level, rules=rules,
+                            state=state, body=body,
+                            omit_if_unused=omit_if_unused, name=name, **kwargs)
 
         # otherwise use all instances of the given type
         else:
             instances = node.findall(groupname)
             for instance in instances:
-                self.visit(instance, level=level, rules=rules, state=state,
-                           omit_if_unused=omit_if_unused, **kwargs)
+                body_ += self.visit(
+                        instance, level=level, rules=rules, state=state,
+                        body=body, omit_if_unused=omit_if_unused, **kwargs)
 
-    def _visit_post_elems(self, node, *, level=0, rules=None, state=None,
-                          **kwargs) -> None:
+        return body_
+
+    def _visit_post_elems(self, node, *, level: int = 0,
+                          rules: Optional[Rules] = None,
+                          body: Optional[Doc] = None, state: Any = None,
+                          **kwargs) -> Optional[Union[Doc, str]]:
         """Visitor method called after visiting each node's child nodes.
 
         The default implementation does nothing.
@@ -755,8 +843,9 @@ class Visitor(Plugin):
         """
 
         # invoke the standalone _post_elems() function if defined
-        self._invoke('_post_elems_', node, level=level, rules=rules,
-                     state=state, args=node.args, **kwargs)
+        return self._invoke('_post_elems_', node=node, level=level,
+                            rules=rules, state=state, body=body,
+                            args=node.args, **kwargs)
 
     def _visit_end(self, root: Root, **kwargs) -> None:
         """Visitor method called after node traversal.
@@ -772,7 +861,7 @@ class Visitor(Plugin):
         """
 
         # invoke the standalone _end_() function if defined
-        self._invoke('_end_', root, args=root.args, **kwargs)
+        self._invoke('_end_', node=root, args=root.args, **kwargs)
 
     # XXX should we attempt to define missing args argument as node.args?
     def _invoke(self, vname: str, *known_args, **known_kwargs) -> Any:
@@ -791,22 +880,32 @@ class Visitor(Plugin):
             return known_arg
 
         if vname in self._method_map:
-            known_kwargs_ = {'cls': type(self), 'self': self,
-                             'logger': self.logger or logger} | known_kwargs
+            logger_ = self.logger or logger
+            logging_kwargs = {'logger': logger_}
+            if (node := known_kwargs.get('node', None)) is not None:
+                # XXX maybe it would be better only to generate error_func()
+                #     etc. when the method expects them, but maybe they're
+                #     not expensive and this isn't important
+                #     (could use logging.report_func
+                logging_kwargs |= {'error': Logging.error_func(node, logger_)}
+                logging_kwargs |= {'warning': Logging.warning_func(node,
+                                                                   logger_)}
+                logging_kwargs |= {'info': Logging.info_func(node, logger_)}
+                logging_kwargs |= {'debug': Logging.debug_func(node, logger_)}
+            known_kwargs_ = {'cls': type(self),
+                             'self': self} | logging_kwargs | known_kwargs
             method, arg_names, kwarg_names = self._method_map[vname]
-            method_args = tuple(known_kwargs_.get(name) or next_known_arg() for
+            method_args = tuple(known_kwargs_.get(name, next_known_arg()) for
                                 name in arg_names)
             method_kwargs = {name: known_kwargs_.get(name, None) for name in
                              kwarg_names if name not in arg_names}
             retval = method(*method_args, **method_kwargs)
-            if 'state' in known_kwargs_ and retval is not None:
-                known_kwargs_['state'] = retval
         return retval
 
     # XXX might want to assign trailing comment and other to the next group
     @classmethod
-    def __groups(cls, node: Node, *, rules: Optional[Rules] = None) -> Dict[
-            str, List[Node]]:
+    def get_groups(cls, node: Node, *, rules: Optional[Rules] = None) -> dict[
+            str, list[Node]]:
         assert rules is not None
         firstname = '_first'
         typename = node.typename
@@ -814,7 +913,8 @@ class Visitor(Plugin):
         elemtypes = order[typename] if order and typename in order else ()
         groups = dict((g, []) for g in (firstname,) + elemtypes)
         groupname = firstname
-        for elem in node.elems:
+        elems = node.h_elems if rules.hierarchical else node.elems
+        for elem in elems:
             elemtype = elem.typename
             if elemtype in groups:
                 groupname = elemtype

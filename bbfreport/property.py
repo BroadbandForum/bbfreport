@@ -65,22 +65,19 @@ Note:
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import re
 
-from typing import Any, Collection, Dict, List, Optional, Tuple, Type, \
+from typing import Any, Collection, Optional, \
     TYPE_CHECKING, Union
 
 from .content import Content
-from .utility import FileName, Namespace, Spec, Status, Utility, Version
+from .logging import Logging
+from .utility import FileName, Namespace, Spec, StrEnum, Utility, Version
 
 # common type aliases
 # XXX none yet
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 class_hierarchy = Utility.class_hierarchy
 upper_first = Utility.upper_first
@@ -170,20 +167,20 @@ It evaluates as Boolean ``False``, so this idiom will often be sufficient::
     if not value:
         <error-handling>
 
-Use of `Null` gives behavior similar to other languages' "safe navigation" 
+Use of `Null` gives behavior similar to other languages' "safe navigation"
 operator, e.g., in Groovy this operator is ``?.``. For example, if ``root`` is
 the root node, then this::
 
     root.xml_files[0].dm_document.dataTypes[0].name
 
-is the name of the first XML file's DM document's first data type. If this 
+is the name of the first XML file's DM document's first data type. If this
 doesn't exist then, rather than crashing, the value will be `Null`.
 """
 
 
 # XXX should move this to a logging module that also handles filtering
-# XXX can probably make this more pythonic by using dynamically-created
-#     functions, like lint.warning_func etc.
+# XXX could probably make this more pythonic by using dynamically-created
+#     functions such as Logging.warning_func()
 class Report:
     """Simple class that takes a node and efficiently determines whether it
     matches the ``--debugpath`` command-line option and therefore should be
@@ -211,9 +208,8 @@ class Report:
             self._debugpath = self._get_debugpath()
             self._enabled = bool(
                     self._debugpath is not None and
-                    # XXX this is an optimization; need to check for 'node'
-                    #  too?
-                    Utility.logger_names & {logger_name, 'node'} and
+                    # XXX this is an optimization
+                    Logging.names & {'node', 'property'} and
                     re.search(node.args.debugpath, self._debugpath))
 
     # XXX it's a bit naughty to expose this
@@ -272,9 +268,9 @@ class PropDescr:
     Some of these examples are referred to in the descriptions below.
     """
 
-    def __init__(self, prop_cls: Type['Property'], *,
+    def __init__(self, prop_cls: type['Property'], *,
                  name: Optional[str] = None, plural: bool = False,
-                 alias: Optional[Union[str, Tuple[str, ...]]] = None,
+                 alias: Optional[Union[str, tuple[str, ...]]] = None,
                  mandatory: bool = False, deprecated: Union[bool, str] = False,
                  default: Optional[Any] = None, internal: bool = False,
                  doc: Optional[str] = None, **kwargs):
@@ -348,9 +344,13 @@ class PropDescr:
         self._deprecated = deprecated
         self._default = default
         self._internal = internal
-        # values are only relevant to Attrs and are only used here for doc
+        # values are only relevant to Attrs
         self._values = kwargs.get('values', None)
-        # node_cls is only relevant to Elems and is only used here for doc
+        # enum_cls is only relevant to EnumAttrs
+        # XXX shouldn't know about it here
+        self._enum_cls = kwargs.get('enum_cls', None)
+        # node_cls is only relevant to Elems
+        # XXX shouldn't know about it here
         self._node_cls = kwargs.get('node_cls', None)
         # __set_name__() calls getdoc() to derive __doc__ from doc etc.
         self._doc = doc
@@ -362,7 +362,7 @@ class PropDescr:
         if name is not None:
             self.__set_name__(None, name)
 
-    def __set_name__(self, owner: Optional[Type[Node]], name: str) -> None:
+    def __set_name__(self, owner: Optional[type[Node]], name: str) -> None:
         """Called (for each `PropDescr`) when the owner class is created. Is
         also called from the constructor when a name was passed to it, with
         ``owner=None`` and ``name=name``.
@@ -413,44 +413,57 @@ class PropDescr:
             self._aname = '_' + sname
 
         # the remaining logic is only performed when there's an owner
+        if owner is None:
+            return
 
         # alias can be None, single alias, or tuple of aliases; also
         # automatically add a 'lower-case' alias if the name isn't lower-case
-        if owner is not None:
-            class AliasWrapper:
-                def __init__(self, propdescr):
-                    self._propdescr = propdescr
+        class AliasWrapper:
+            def __init__(self, propdescr):
+                self._propdescr = propdescr
 
-                def __get__(self, node_, owner_=None):
-                    if node_ is None:
-                        return self
-                    else:
-                        return self._propdescr.__get__(node_, owner_)
+            def __get__(self, node_, owner_=None):
+                if node_ is None:
+                    return self
+                else:
+                    return self._propdescr.__get__(node_, owner_)
 
-                def __set__(self, node_, value_):
-                    self._propdescr.__set__(node_, value_)
+            def __set__(self, node_, value_):
+                self._propdescr.__set__(node_, value_)
 
-                def __repr__(self):
-                    return '%s(%r)' % (type(self).__name__, self._propdescr)
+            def __repr__(self):
+                return '%s(%r)' % (type(self).__name__, self._propdescr)
 
-            aliases = self._alias if isinstance(self._alias, tuple) else (
-                self._alias,) if self._alias is not None else ()
-            if self._name.lower() != self._name:
-                aliases += (self._name.lower(),)
+        aliases = self._alias if isinstance(self._alias, tuple) else (
+            self._alias,) if self._alias is not None else ()
+        if self._name.lower() != self._name:
+            aliases += (self._name.lower(),)
 
-            # XXX disable aliases for now
-            aliases = []
-            for alias in aliases:
-                assert alias != name, "%s alias %r can't be the same as " \
-                                      "name %r" % (self, alias, name)
-                setattr(owner, alias, AliasWrapper(self))
-                logger.debug('created %r wrapper for %r' % (alias, self))
+        # XXX disable aliases for now
+        aliases = []
+        for alias in aliases:
+            assert alias != name, "%s alias %r can't be the same as " \
+                                  "name %r" % (self, alias, name)
+            setattr(owner, alias, AliasWrapper(self))
+            logger.debug('created %r wrapper for %r' % (alias, self))
+
+        # if _enum_cls is a StrEnum, call its check() method, e.g., to check
+        # that its default and values are valid
+        if isinstance(self._enum_cls, type) and \
+                issubclass(self._enum_cls, StrEnum):
+            self._enum_cls.check(owner.__name__, name)
+
+            # if there's a default, it's created by invoking _enum_cls()
+            if self._enum_cls.default is not None:
+                assert self._default is None, \
+                    "%s: %r can't specify both 'enum_cls' and 'default'" % (
+                        owner.__name__, self._name)
+                self._default = self._enum_cls
 
         # set the documentation string
-        if owner is not None:
-            self.__doc__ = self.getdoc()
+        self.__doc__ = self.getdoc()
 
-    def __get__(self, node: Node, owner: Optional[Type[Node]] = None) -> Any:
+    def __get__(self, node: Node, owner: Optional[type[Node]] = None) -> Any:
         """Get the value of this `PropDescr`'s `Property` on the supplied node.
 
         If the underlying `Property` object doesn't exist, the default value is
@@ -557,7 +570,7 @@ class PropDescr:
         #     indicate this
         islist = self._prop_cls.islist() and ptype == 'element'
         if islist:
-            comps += ['``List[`` ']
+            comps += ['``list[`` ']
 
         # removal of 'typing.' is cosmetic
         vname = None if vtype is None else vtype.__name__ if isinstance(
@@ -642,14 +655,14 @@ class Property:
     """Node property (attribute or element)."""
 
     ptype: str = 'unknown'
-    """Property type as a user-oriented string, e.g. "attribute" or 
+    """Property type as a user-oriented string, e.g. "attribute" or
     "element". This string can be used in generated documentation."""
 
     vtype: Optional[type] = None
     """Property value type."""
 
     default: Optional[Any] = None
-    """Property class default. If this is a class, it's invoked (with no 
+    """Property class default. If this is a class, it's invoked (with no
     arguments) to create the default. Otherwise it's just assigned. For
     mutable defaults, it's important to use the first approach!"""
 
@@ -866,8 +879,6 @@ class Property:
     def _merge(self, value: Any, *, report: Optional[Report] = None) -> bool:
         """Merge the supplied value into the property.
 
-        Derived classes must implement this method.
-
         Args:
             value: value: The value to add or merge.
             report: Whether to report.
@@ -876,8 +887,8 @@ class Property:
             Whether `Holder.merge()` should replace the property value.
         """
 
-        raise NotImplementedError('%s: unimplemented %s._merge()' % (
-            report, type(self).__name__))
+        self._value = value
+        return False
 
     # XXX this can output too much, and what it outputs isn't always useful
     def __str__(self):
@@ -893,9 +904,6 @@ class Property:
 
 class Attr(Property):
     """Attribute property. An attribute value is not a node."""
-
-    def _merge(self, value: Any, *, report: Optional[Report] = None) -> bool:
-        return super()._merge(value, report=report)
 
     ptype = 'attribute'
 
@@ -915,8 +923,7 @@ class BoolAttr(Attr):
         valid = self.__false_values + self.__true_values
         assert value in valid, '%s: invalid %r value %r' % (
             report, self.name, value)
-        self._value = value in self.__true_values
-        return False
+        return super()._merge(value in self.__true_values, report=report)
 
     @property
     def value_as_string(self) -> str:
@@ -935,8 +942,7 @@ class IntAttr(Attr):
         ``_value``."""
         isint = isinstance(value, int) or re.match(r'-?\d+', value)
         assert isint, '%s: invalid %r value %r' % (report, self.name, value)
-        self._value = int(value) if isint else value
-        return False
+        return super()._merge(int(value) if isint else value, report=report)
 
 
 class IntOrUnboundedAttr(Attr):
@@ -951,8 +957,7 @@ class IntOrUnboundedAttr(Attr):
         isint = isinstance(value, int) or re.match(r'-?\d+', value)
         assert isint or value == 'unbounded', '%s: invalid %r value %r' % (
             report, self.name, value)
-        self._value = int(value) if isint else value
-        return False
+        return super()._merge(int(value) if isint else value, report=report)
 
 
 class DecimalAttr(Attr):
@@ -965,11 +970,6 @@ class DecimalAttr(Attr):
 
     vtype = str
 
-    def _merge(self, value: str, *, report: Optional[Report] = None) -> bool:
-        """No validation. Just set ``_value``."""
-        self._value = value
-        return False
-
 
 class StrAttr(Attr):
     """String attribute property."""
@@ -980,54 +980,79 @@ class StrAttr(Attr):
         """Check the supplied value is a string. Then set ``_value``."""
         assert isinstance(value, str), '%s: invalid %r value %r' % (
             report, self.name, value)
-        self._value = value
-        return False
+        return super()._merge(value, report=report)
 
 
+# XXX this is no longer used; should excise ._values from everywhere
 class EnumStrAttr(StrAttr):
     """Enumerated string attribute property."""
 
-    def __init__(self, *, values: Optional[Tuple[str, ...]] = None, **kwargs):
+    def __init__(self, *, values: tuple[str, ...], **kwargs):
         """Call the superclass constructor and save the valid values.
 
         Args:
             values: Valid values.
             **kwargs: Additional keyword arguments (passed to the superclass
                 constructor).
-
-        Note:
-            The valid values are currently ignored (although `PropDescr`
-            uses them when generating documentation). They should be used
-            when setting the attribute value. `PropDescr` should also use
-            them to check that the default (if supplied) is valid.
         """
+
         super().__init__(**kwargs)
-        self._values = values or ()
+        self._values = values
+
+    def _merge(self, value: str, *, report=None) -> bool:
+        if value not in self._values:
+            logger.error('%s: invalid %r value %r' % (
+                report, self.name, value))
+        return super()._merge(value, report=report)
+
+    @property
+    def values(self) -> tuple[str, ...]:
+        return self._values
 
 
-class StatusEnumStrAttr(EnumStrAttr):
-    """Node status enumerated string attribute property."""
+class EnumObjAttr(Attr):
+    """Enumerated string attribute property with underlying `StrEnum`
+    object."""
 
-    def __init__(self, *, default: Optional[Any] = None, **kwargs):
+    # XXX this is the base class; the actual value will be Status etc.
+    vtype = StrEnum
+
+    def __init__(self, *, enum_cls: type[StrEnum], **kwargs):
         """Call the superclass constructor.
 
         Args:
-            values: Valid values.
+            enum_cls: Must be a `StrEnum` subclass, e.g., `Status`.
             **kwargs: Additional keyword arguments (passed to the superclass
                 constructor).
         """
 
-        super().__init__(values=Status.names, default=default, **kwargs)
+        super().__init__(**kwargs)
+        self._enum_cls = enum_cls
 
-    def _merge(self, value: Union[str, Status], *,
+    def _merge(self, value: Union[str, StrEnum], *,
                report: Optional[Report] = None) -> bool:
-        """Convert the supplied value to a ``Status`` if necessary. Then
-        set ``_value``."""
+        """Convert the supplied value if necessary. Then set ``_value``."""
 
-        if not isinstance(value, Status):
-            value = Status(value)
-        self._value = value
-        return False
+        enum_cls = self._enum_cls
+        if not isinstance(value, enum_cls):
+            value = enum_cls(value)
+        if value.value not in enum_cls.values:
+            # check for leading/trailing whitespace
+            if value.value.strip() in enum_cls.values:
+                logger.error('%s: invalid leading/trailing whitespace in %r '
+                             'value %r' % (report, self.name, value.value))
+
+            # check for case inconsistencies
+            elif value.value.lower() in {v.lower() for v in enum_cls.values}:
+                logger.error('%s: inconsistent upper/lower case in %r value '
+                             '%r' % (report, self.name, value.value))
+
+            # output generic message
+            else:
+                logger.error('%s: invalid %r value %r' % (report, self.name,
+                                                          value.value))
+
+        return super()._merge(value, report=report)
 
 
 # this outputs a warning when things are redefined (it's intended to be used
@@ -1042,7 +1067,7 @@ class RedefineCheckStrAttr(StrAttr):
         return super()._merge(value, report=report)
 
 
-class NamespaceStrAttr(StrAttr):
+class NamespaceStrAttr(Attr):
     """XML namespace string attribute property."""
 
     def _merge(self, value: Union[str, Namespace], *,
@@ -1055,11 +1080,10 @@ class NamespaceStrAttr(StrAttr):
             value = Namespace.get(value, attr=self.name)
         elif value.attr is None:
             value.attr = self.name
-        self._value = value
-        return False
+        return super()._merge(value, report=report)
 
 
-class VersionStrAttr(StrAttr):
+class VersionStrAttr(Attr):
     """Version string attribute property."""
 
     def __init__(self, *, levels: int = 2, **kwargs):
@@ -1082,11 +1106,10 @@ class VersionStrAttr(StrAttr):
 
         if not isinstance(value, Version):
             value = Version(value, levels=self._levels)
-        self._value = value
-        return False
+        return super()._merge(value, report=report)
 
 
-class FileNameStrAttr(StrAttr):
+class FileNameStrAttr(Attr):
     def _merge(self, value: Union[str, FileName], *,
                report: Optional[Report] = None) -> bool:
         """Convert the supplied value to a ``FileName`` if necessary. Then
@@ -1094,11 +1117,10 @@ class FileNameStrAttr(StrAttr):
 
         if not isinstance(value, FileName):
             value = FileName(value)
-        self._value = value
-        return False
+        return super()._merge(value, report=report)
 
 
-class SpecStrAttr(StrAttr):
+class SpecStrAttr(Attr):
     def _merge(self, value: Union[str, Spec], *,
                report: Optional[Report] = None) -> bool:
         """Convert the supplied value to a ``Spec`` if necessary. Then
@@ -1106,14 +1128,13 @@ class SpecStrAttr(StrAttr):
 
         if not isinstance(value, Spec):
             value = Spec(value)
-        self._value = value
-        return False
+        return super()._merge(value, report=report)
 
 
 class StrDictAttr(Attr):
     """String dictionary attribute property."""
 
-    vtype = Dict[str, str]
+    vtype = dict[str, str]
     default = dict
 
     def _merge(self, value: str, *, report: Optional[Report] = None) -> bool:
@@ -1138,8 +1159,7 @@ class StrDictAttr(Attr):
         for i in range(0, len(comps), 2):
             name_, value_ = comps[i], comps[i + 1]
             value[name_] = value_
-        self._value = value
-        return False
+        return super()._merge(value, report=report)
 
     @property
     def value_as_string(self) -> str:
@@ -1170,7 +1190,7 @@ class NamespaceStrDictAttr(StrDictAttr):
 class StrListAttr(Attr):
     """String list attribute property."""
 
-    vtype = List[str]
+    vtype = list[str]
     default = list
 
     def _merge(self, value: Union[str, list, tuple], *,
@@ -1186,11 +1206,12 @@ class StrListAttr(Attr):
             2. Values coming straight from XML will be strings, but values
                from existing properties will be lists.
         """
+
         assert isinstance(value,
                           (list, tuple, str)), '%s: invalid %r value %r' % (
             report, self.name, value)
-        self._value = value.split() if isinstance(value, str) else value[:]
-        return False
+        return super()._merge(value.split() if isinstance(value, str) else
+                              value[:], report=report)
 
     @property
     def value_as_string(self):
@@ -1206,12 +1227,12 @@ class ContentAttr(Attr):
     vtype = Content
     default = Content
 
-    def _merge(self, value: Union[str, Tuple[Node, ...]], *,
+    def _merge(self, value: Union[str, tuple[Node, ...]], *,
                report: Optional[Report] = None) -> bool:
-        """If the supplied value is a string, use it directly. Otherwise,
-        it should be a tuple of nodes, from which the text is collected and
-        processed as described below. Then set ``_value`` to the resulting
-        string.
+        """If the supplied value is a string or `Content`, use its text
+        directly. Otherwise, it should be a tuple of nodes, from which the
+        text is collected and processed as described below. Then set
+        ``_value`` to the resulting string.
 
         The text is currently just concatenated and then passed to the
         `Utility.whitespace()` function.
@@ -1228,6 +1249,10 @@ class ContentAttr(Attr):
         if isinstance(value, str):
             text = value
 
+        # if value is Content, its text replaces the current text
+        elif isinstance(value, Content):
+            text = value.text
+
         # otherwise expect value to be a tuple of nodes
         else:
             assert isinstance(value, tuple), 'value must be a tuple'
@@ -1239,8 +1264,7 @@ class ContentAttr(Attr):
             text = whitespace(''.join(atoms)) if atoms else None
 
         # always create a new Content object
-        self._value = Content(text, preprocess=True)
-        return False
+        return super()._merge(Content(text, preprocess=True), report=report)
 
 
 class Elem(Property):
@@ -1251,7 +1275,7 @@ class Elem(Property):
 
     # node_cls defaults to name
     def __init__(self, *, name: Optional[str] = None,
-                 node_cls: Optional[Union[str, Type[Node]]] = None, **kwargs):
+                 node_cls: Optional[Union[str, type[Node]]] = None, **kwargs):
         """Call the superclass constructor and save the node class.
 
         Args:
@@ -1268,11 +1292,8 @@ class Elem(Property):
         super().__init__(name=name, **kwargs)
         self._node_cls = node_cls or name
 
-    def _merge(self, value: Any, *, report: Optional[Report] = None) -> bool:
-        return super()._merge(value, report=report)
-
     @property
-    def node_cls(self) -> Union[str, Type[Node]]:
+    def node_cls(self) -> Union[str, type[Node]]:
         """Return the node class name or type object."""
         return self._node_cls
 
@@ -1310,6 +1331,8 @@ class SingleElem(Elem):
             for node_prop in node.props:
                 value_prop = value_node.getprop(node_prop.name)
                 value_prop.merge(node_prop.value, report=report)
+
+        # XXX ideally we'd call super()._merge()
         return False
 
 
@@ -1342,11 +1365,11 @@ class DescriptionSingleElem(SingleElem):
             node_content = Utility.whitespace(node.content.text) or ''
             separator = '{{np}}' if curr_content and node_content else ''
             # XXX should warn of unnecessary 'create' or omitted 'replace'?
-            if node.action in {None, 'create', 'replace'}:
+            if node.action.value in {None, 'create', 'replace'}:
                 curr.content = node_content
-            elif node.action in {'prefix'}:
+            elif node.action.value in {'prefix'}:
                 curr.content = node_content + separator + curr_content
-            elif node.action in {'append'}:
+            elif node.action.value in {'append'}:
                 curr.content = curr_content + separator + node_content
             else:
                 logger.error('%s: invalid description action %r' % (
@@ -1356,6 +1379,8 @@ class DescriptionSingleElem(SingleElem):
             # reset the current value's action attribute; it's probably not
             # set, but it might have been explicitly set to 'create'
             curr.action = None
+
+        # XXX ideally we'd call super()._merge()
         return False
 
 
@@ -1388,6 +1413,7 @@ class SyntaxSingleElem(SingleElem):
                     # XXX hide the old type so plugins can choose to ignore it
                     #     (visitor.py will do this automatically)
                     old_type.value.hide()
+
         return super()._merge(node, report=report)
 
 
@@ -1474,11 +1500,13 @@ class ListElem(Elem):
             # XXX can this in fact happen?
             logger.error("%s: don't know how to merge %r value %r" % (
                 report, self, node))
+
+        # XXX ideally we'd call super()._merge()
         return False
 
     # XXX the comment about facets isn't necessarily correct; surely status
     #     should be carried over, for example?
-    def _mergelist(self, nodes: List[Node], *,
+    def _mergelist(self, nodes: list[Node], *,
                    report: Optional[Report] = None) -> bool:
         """Merge a list of nodes into an existing list of nodes.
 
@@ -1504,7 +1532,7 @@ class ListElem(Elem):
 class ValueListElem(ListElem):
     """Node list element property (specifically for `_ValueFacet`)."""
 
-    def _mergelist(self, nodes: List[Node], *,
+    def _mergelist(self, nodes: list[Node], *,
                    report: Optional[Report] = None) -> bool:
         """Copy the old values to the new values, merging descriptions."""
 
@@ -1527,6 +1555,15 @@ class ValueListElem(ListElem):
                         old_prop.merge(new_prop.value, report=report)
 
                 new_values += [old_value]
+
+        # check for missing values
+        new_values_values = [v.value for v in new_values]
+        missing_values = [v for v in old_values if v not in new_values_values]
+        for missing_value in missing_values:
+            missing_elemname = old_values[missing_value].typename
+            logger.warning('%s: %s %s removed; should instead mark as '
+                           'deprecated' % (
+                               report, missing_elemname, missing_value))
 
         # update the property value and request replacement
         self._value = new_values
@@ -1608,7 +1645,7 @@ class Holder:
             report, type(self).__name__))
 
     @property
-    def props(self) -> Tuple[Property, ...]:
+    def props(self) -> tuple[Property, ...]:
         """This holder's properties."""
         raise NotImplementedError('unimplemented %s.props' % type(
                 self).__name__)
@@ -1654,12 +1691,12 @@ class Attrs(Holder):
         return '%s(%s)' % (type(self).__name__, self)
 
     @property
-    def props(self) -> Tuple[Attr, ...]:
+    def props(self) -> tuple[Attr, ...]:
         """A tuple of properties."""
         return tuple(self._dict.values())
 
     @property
-    def value(self) -> Dict[str, str]:
+    def value(self) -> dict[str, str]:
         """A dictionary mapping property name to property value (as
         returned by `Property.value_as_string`)."""
         return {n: p.value_as_string for n, p in self._dict.items()}
@@ -1731,7 +1768,7 @@ class Elems(Holder):
             # '' means "add as first child of parent" (for objects,
             # this requires additional logic)
             if previous == '' and typename == 'object' and \
-                    (parent_objpath := node.object_parent.objpath) != '':
+                    (parent_objpath := node.h_parent.objpath) != '':
                 if report:
                     logger.info("%s: previous %s -> %s" % (
                         report, Utility.nice_string(previous),
@@ -1769,18 +1806,18 @@ class Elems(Holder):
                 elif typename == 'object' and existing.typename == 'object':
                     # node is the parent of an existing child; insert it
                     # before the child
-                    if node is existing.object_parent:
+                    if node is existing.h_parent:
                         if report:
                             logger.info('%s: inserted before existing child %s'
                                         % (report, existing))
                         node_to_prop[node] = True
                     # node is the child of an existing parent; will insert it
                     # after the last descendant of this parent
-                    elif existing is node.object_parent:
+                    elif existing is node.h_parent:
                         node_parent_name = existing_name
                     # insert it before the node after the last descendant
-                    # XXX should use object_xxx() methods rather than doing
-                    #     string processing on the node name
+                    # XXX should use h_xxx() methods rather than doing string
+                    #     processing on the node name
                     elif node_parent_name and not \
                             existing_name.startswith(node_parent_name):
                         if report:
@@ -1815,12 +1852,12 @@ class Elems(Holder):
         return '%s(%s)' % (type(self).__name__, self)
 
     @property
-    def props(self) -> Tuple[Elem, ...]:
+    def props(self) -> tuple[Elem, ...]:
         """A tuple of properties."""
         return tuple(self._props.keys())
 
     @property
-    def value(self) -> Tuple[Node, ...]:
+    def value(self) -> tuple[Node, ...]:
         """A tuple of nodes."""
         return tuple(self._node_to_prop.keys())
 

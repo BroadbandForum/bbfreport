@@ -1,6 +1,6 @@
-"""Hide first model transform plugin."""
+"""Hide the first document."""
 
-# Copyright (c) 2023, Broadband Forum
+# Copyright (c) 2023-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -40,30 +40,55 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-from bbfreport.node import Model, Root
+from bbfreport.node import _Base, _Document, Root
+
+from typing import cast, Optional
+
+
+def get_documents(document: _Document, *,
+                  documents: Optional[set[_Document]] = None) -> \
+        set[_Document]:
+    if documents is None:
+        documents = set()
+    # XXX _Document doesn't have imports, but both Dm_document and Dt_document
+    #     do
+    # noinspection PyUnresolvedReferences
+    for import_ in document.imports:
+        for xml_file in import_.xml_files:
+            documents.add(xml_file.document)
+            get_documents(xml_file.document, documents=documents)
+    return documents
 
 
 def visit(root: Root, logger) -> None:
-    def nice(mod: Model) -> str:
-        return '{%s}%s' % (mod.key[0], mod)
-
-    # get the un-hidden models from the command-line documents
-    models = []
+    # get the un-hidden command-line documents
+    documents = []
     for xml_file in root.xml_files:
-        dm_document = xml_file.dm_document
-        for model in dm_document.models:
-            if model in models:
-                logger.info('already saw %s' % nice(model))
-            elif model.is_hidden:
-                logger.info('ignored hidden %s' % nice(model))
-            else:
-                models.append(model)
-                logger.info('added %s' % nice(model))
+        document = xml_file.document
+        if document in documents:
+            logger.info('already saw %s' % document.keylast)
+        elif document.is_hidden:
+            logger.info('ignored hidden %s' % document.keylast)
+        else:
+            documents.append(document)
+            logger.info('added %s' % document.keylast)
 
-    # if there are multiple models, hide the first one (the expected use
+    # if there are multiple documents, hide the first one (the expected use
     # case is that there are two; if necessary this transform can be applied
     # more than once)
-    if len(models) > 1:
-        model = models[0]
-        model.hide()
-        logger.info('hid %s' % nice(model))
+    if len(documents) > 1:
+        documents[0].hide()
+        logger.info('hid %s' % documents[0].keylast)
+
+        # also need to hide files that are imported (directly or indirectly)
+        # by the first document but not any of the other documents
+        documents_not_to_hide = set()
+        for document in documents[1:]:
+            get_documents(document, documents=documents_not_to_hide)
+        documents_to_hide = get_documents(documents[0]) - documents_not_to_hide
+        for document in documents_to_hide:
+            # XXX this shouldn't be necessary, but _Document is currently a
+            #     _Mixin, not a _Base
+            document = cast(_Base, document)
+            document.hide()
+            logger.info('hid %s' % document.keylast)

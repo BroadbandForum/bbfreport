@@ -41,19 +41,16 @@
 # license grant are also deemed granted under this license.
 
 import glob
-import logging
 import os
 import os.path
 import re
 
-from typing import List, Optional
+from typing import Optional
 
+from .logging import Logging
 from .utility import FileName, Spec, Utility
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class File:
@@ -68,10 +65,10 @@ class File:
     _cache = {}
 
     @classmethod
-    def find(cls, path: str, *, dirs: Optional[List[str]] = None,
+    def find(cls, path: str, *, dirs: Optional[list[str]] = None,
              nocurdir: bool = False, recursive: bool = False,
-             spec: Optional[Spec] = None, ignore_spec: bool = False) -> \
-                Optional[str]:
+             spec: Optional[Spec] = None, ignore_spec: bool = False) \
+            -> Optional[str]:
         """Find a file.
 
         Any ``~user`` or ``$variable`` strings in the file path and directory
@@ -133,7 +130,7 @@ class File:
 
     # noinspection GrazieInspection
     @classmethod
-    def __findfile(cls, file: str, *, dirs: Optional[List[str]] = None,
+    def __findfile(cls, file: str, *, dirs: Optional[list[str]] = None,
                    recursive: bool = False, drive: Optional[str] = None,
                    spec: Optional[Spec] = None, ignore_spec: bool = False) \
             -> Optional[str]:
@@ -204,7 +201,7 @@ class File:
 
     # noinspection GrazieInspection
     @classmethod
-    def __latest(cls, paths: List[str], orig: FileName) -> Optional[str]:
+    def __latest(cls, paths: list[str], orig: FileName) -> Optional[str]:
         assert paths
         latest = None
         for path in paths:

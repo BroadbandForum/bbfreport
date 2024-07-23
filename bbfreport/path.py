@@ -40,21 +40,18 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import re
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Optional, Union
 
+from .logging import Logging
 from .property import Null, NullType
-from .utility import Utility
+from .utility import ScopeEnum
 
 # we don't want to import .node, because it imports this module!
 Node = Any
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 # XXX the entity map doesn't really belong here:
@@ -67,7 +64,7 @@ ObjPath = str
 
 
 class Path:
-    entity_map: Dict[Node, Dict[ObjPath, Node]] = {}
+    entity_map: dict[Node, dict[ObjPath, Node]] = {}
 
     @classmethod
     def _add_to_entity_map_helper(cls, node: Node, *, model: Node,
@@ -148,12 +145,8 @@ class Path:
         assert len(self._comps) > 0
 
     def absolute_path(self, objpath: 'Path', *,
-                      scope: Optional[str] = None) -> 'Path':
+                      scope: Optional[ScopeEnum] = None) -> 'Path':
         assert isinstance(objpath, Path) and objpath.uplevels == 0
-
-        # XXX 'absolute' scope is non-standard
-        scope = scope or 'normal'
-        assert scope in {'absolute', 'normal', 'model', 'object'}
 
         # objpath can reference an object, parameter, command or event, but its
         # final component (which is empty for an object) is always ignored
@@ -294,7 +287,7 @@ def get_entity(objpath: str, model: Node) -> Union[Node, NullType]:
 
 
 def absolute_path(target: str, objpath: str, *,
-                  scope: Optional[str] = None) -> str:
+                  scope: Optional[ScopeEnum] = None) -> str:
     return str(Path(target).absolute_path(Path(objpath), scope=scope))
 
 
@@ -302,7 +295,7 @@ def absolute_path(target: str, objpath: str, *,
 # XXX this should be integrated into the Path class and could almost certainly
 #     share more of its logic, e.g. command and event special cases
 def relative_path(target: str, objpath: str, *,
-                  scope: Optional[str] = None, strip: int = 0):
+                  scope: Optional[ScopeEnum] = None, strip: int = 0):
     # target is probably absolute already, but this isn't required
     atarget = absolute_path(target, objpath, scope=scope)
 
@@ -372,9 +365,13 @@ command_or_event_pattern = re.compile(r'(\(\)|!)$')
 
 
 def follow_reference(node: Node,
-                     target_or_targets: Optional[Union[str, List[str]]], *,
-                     scope: Optional[str] = None,
+                     target_or_targets: Optional[Union[str, list[str]]], *,
+                     scope: Optional[ScopeEnum] = None,
                      quiet: bool = False) -> Union[Node, NullType]:
+    # protect against being called with a Null node
+    if not node:
+        return Null
+
     # XXX should handle this better
     set_entity_map(node)
 
@@ -435,9 +432,12 @@ def follow_reference(node: Node,
     bad_refpaths = []
     for objpath_ in objpaths:
         for target in targets:
-            # XXX ignore targets containing '.Services.' because these will be
-            #     referencing a different data model
-            if target.find('.Services.') >= 0:
+            # XXX ignore targets containing '.Services.' (apart from the
+            #     Services object itself) because these will be referencing
+            #     a different data model
+            if target not in \
+                    {'Device.Services.', 'InternetGatewayDevice.Services.'} \
+                    and target.find('.Services.') >= 0:
                 continue
 
             # - allow direct references between input and output arguments

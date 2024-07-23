@@ -41,6 +41,8 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
+from typing import Optional
+
 
 class BBFReportException(Exception):
     """Base ``bbfreport`` exception."""
@@ -65,6 +67,22 @@ class FormatException(BBFReportException):
 
 class MacroException(BBFReportException):
     """Macro expansion exception."""
+
+
+# XXX should make this more specific?
+class NodeException(BBFReportException):
+    """Node tree traversal exception."""
+
+    def __init__(self, text: str, name: Optional[str] = None):
+        """``name`` should be the name of the affected node, e.g., for use
+        in error messages."""
+
+        super().__init__(text)
+        self._name = name
+
+    @property
+    def name(self) -> Optional[str]:
+        return self._name
 
 
 class ParserException(BBFReportException):

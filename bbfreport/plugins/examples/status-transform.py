@@ -40,18 +40,13 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
-
 from typing import Any
 
-from ..node import _HasDescription
-from ..transform import Transform
-from ..utility import Utility
+from ...logging import Logging
+from ...node import _HasDescription
+from ...transform import Transform
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class StatusTransform(Transform):

@@ -40,11 +40,24 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-# XXX should add more info here, but avoid duplication with setup.py
-# XXX is it OK to invent new dunder names such as __tool_name__?
-__tool_name__ = 'report.py'
-__version__ = '2.1.0'  # trailing '+' means 'interim version'
-__version_date__ = '2024-01-18'  # can use "TBD" for unknown components
+from .content import Content
+from .exception import BBFReportException
+from .format import Format
+from .logging import Logging
+from .layout import Doc as LayoutDoc
+from .macro import Macro
+from .macros import DummyMacros
+# XXX it's hard to know which node types to import; perhaps the main
+#     "public" elements, and others as needed (can always get them from
+#     bbfreport.node)
+from .node import DataType, DataTypeAccessor, Dm_document, Root, Xml_file
+from .parser import Parser
+from .plugin import Plugin
+from .property import Null
+from .transform import Transform
+# XXX should import more? or just import directly from bbfreport.utility
+from .utility import Utility, Version
+from .version import __version__, __version_date__
 
 
 # use this when reporting the version
@@ -59,21 +72,5 @@ def version(*, as_markdown: bool = False) -> str:
         bbf = '[%s](https://www.broadband-forum.org)' % bbf
         package = '[%s](%s)' % (pypi_package, pypi_url)
 
-    return '%s %s v%s (%s version)' % (bbf, package,
-                                       __version__, __version_date__)
-
-
-from .content import Content
-from .exception import BBFReportException
-from .format import Format
-from .macro import Macro
-from .macros import DummyMacros
-# XXX it's hard to know which node types to import; perhaps the main "public"
-#     elements, and others as needed (can always get them from bbfreport.node)
-from .node import DataType, DataTypeAccessor, Dm_document, Root, Xml_file
-from .parser import Parser
-from .plugin import Plugin
-from .property import Null
-from .transform import Transform
-# XXX should import more? or just import directly from bbfreport.utility
-from .utility import Utility, Version
+    return '%s %s %s (%s version)' % (bbf, package,
+                                      __version__, __version_date__)

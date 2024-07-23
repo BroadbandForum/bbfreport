@@ -45,7 +45,6 @@ Note:
 # license grant are also deemed granted under this license.
 
 import importlib
-import logging
 import re
 
 # You will need to install PyXB, e.g. pip install pyxb
@@ -54,20 +53,16 @@ import re
 import pyxb
 import pyxb.binding
 
-from ..exception import ParserException
-from ..parser import Data, Parser
-from ..utility import Utility
+from ...exception import ParserException
+from ...logging import Logging
+from ...parser import Data, Parser
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class PyxbParser(Parser):
-    def _parse(self, path: str, *, warn_tabs: bool = False,
-               smart_cdata: bool = False,
-               expand_entities: bool = False) -> Data:
+    @staticmethod
+    def _parse(path: str, **_kwargs) -> Data:
         # read the file and determine the DM version
         # XXX should search for file; do this in the caller and pass
         #  realpath?

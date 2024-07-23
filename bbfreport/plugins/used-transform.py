@@ -49,7 +49,7 @@ It currently just visits the following types of node.
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-from ..node import _HasContent, DataTypeRef, Object, Syntax
+from ..node import _HasContent, DataTypeRef, Dt_object, Object, Syntax
 
 # XXX this does more things, e.g. it points #entries parameters back to their
 #     tables; it should probably be renamed; 'fixup'?
@@ -60,6 +60,8 @@ from ..node import _HasContent, DataTypeRef, Object, Syntax
 
 # XXX similarly it may (for example) mark as a used a bibref that is
 #     referenced by a data type that ends up not being used
+
+# XXX may need to do more with DT support
 
 
 # do nothing if --thisonly was specified
@@ -80,15 +82,16 @@ def visit_data_type_ref(data_type: DataTypeRef) -> None:
 
 # this is a description (or other description-like content) anywhere
 # noinspection PyShadowingBuiltins
-def visit__has_content(node: _HasContent) -> None:
+def visit__has_content(node: _HasContent, error, warning, info, debug) -> None:
     typename_map = {'abbref': 'abbreviationsItem', 'bibref': 'reference',
                     'gloref': 'glossaryItem', 'template': 'template'}
 
     # (name, id) tuples for {{bibref}} etc. references with at least one
     # simple argument
     refs = [(ref.name, ref.args[0].text) for key, refs in
-            node.content.macro_refs.items() for ref in refs if
-            key in typename_map and len(ref.args) > 0 and ref.args[
+            node.content.get_macro_refs(error=error, warning=warning,
+                                        info=info, debug=debug).items() for ref
+            in refs if key in typename_map and len(ref.args) > 0 and ref.args[
                 0].is_simple]
     for name, id in refs:
         if item := node.find(typename_map[name], id):
@@ -114,3 +117,10 @@ def visit_object(node: Object, logger) -> None:
             # assume that the lint transform will output any warnings
             if parameter := parameter_ref.refNode:
                 parameter.getprop('uniqueKeyNodes').merge(unique_key)
+
+
+# this is necessary because, when processing a DT instance, the DM objects
+# aren't visited
+def visit_dt_object(node: Dt_object, logger):
+    if ref_node := node.refNode:
+        visit_object(ref_node, logger)

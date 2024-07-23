@@ -40,21 +40,18 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
 import numbers
 import re
 import string
 
-from typing import Any, Callable, cast, Dict, List, Optional, Union
+from typing import Any, Callable, cast, Optional, Union
 
-from .content import Content, MacroRef, MacroArg
+from .content import CLOSE_DIV, Content, MacroRef, MacroArg, OPEN_DIV
 from .exception import MacroException
-from .utility import Utility
+from .logging import Logging
+from .node import _HasContent
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class Macro:
@@ -99,14 +96,28 @@ class Macro:
         self._macros[macro_name] = self
 
     @classmethod
-    def expand(cls, content: Content, *,
-               node=None, args=None, **kwargs) -> str:
+    def expand(cls, content: Content, *, noauto: bool = False,
+               node: Optional[_HasContent] = None, args=None,
+               error=None, warning=None, info=None, debug=None,
+               **kwargs) -> str:
         if args is None and node is not None:
             args = node.args
-        content_plus = cls._content_plus(content, node=node)
+        content_plus = content if noauto else \
+            cls._content_plus(content, node=node)
 
-        text = cls._expand_arg(
-                content_plus.body, node=node, args=args, **kwargs)
+        # helper that's used below to ignore warnings
+        def ignore(*_args, **_kwargs):
+            pass
+
+        # ignore warnings here because the 'used' transform will already
+        # have reported them for the original content
+        body = content_plus.get_body(error=error, warning=ignore,
+                                     info=info, debug=debug)
+
+        # don't ignore warnings here
+        text = cls._expand_arg(body, node=node, args=args, error=error,
+                               warning=warning, info=info, debug=debug,
+                               **kwargs)
 
         # ensure that there are no leading newlines
         # XXX there shouldn't be any; but should remove trailing whitespace?
@@ -120,7 +131,7 @@ class Macro:
 
     # self._body functions should raise MacroException on error
     def _expand_ref(self, macro_ref: MacroRef,
-                    active: Optional[Dict[Any, int]] = None,
+                    active: Optional[dict[Any, int]] = None,
                     **kwargs) -> Optional[str]:
         if active is None:
             active = {}
@@ -162,7 +173,6 @@ class Macro:
         #     element will be further expanded (if need be) and then all the
         #     results concatenated; this would allow things like {{replaced}}
         #     in {{param|{{replaced|A|B}}}}' to return ({{deleted|A}},
-        #
 
         # if the expansion is a Content instance, it needs to be re-expanded
         if isinstance(expansion, Content):
@@ -252,7 +262,8 @@ class Macro:
             if macro.auto == 'before':
                 before.extend(['{{%s}}' % name, separator])
             else:
-                after.extend([separator, '{{%s}}' % name])
+                after.extend([separator, '%s{{%s}}%s' % (
+                    OPEN_DIV, name, CLOSE_DIV)])
 
         # this is used for the {{diffs}} macro
         if content.footer:
@@ -310,8 +321,17 @@ class Macro:
                             'whitespace' % macro_name)
                 macro = Macro._macros.get(macro_name.strip(), None)
                 if macro is None:
-                    warning('{{%s}}: non-existent macro' % macro_name)
-                    chunk = '{{%s|non-existent}}' % macro_name
+                    # this indicates a non-existent macro
+                    non_existent = 'non-existent'
+
+                    # XXX if the macro argument is non_existent, we've already
+                    #     been here, so don't output the message (need a better
+                    #     way of marking and checking for this situation)
+                    already = len(macro_ref.args) == 1 and macro_ref.args[
+                        0].is_simple and macro_ref.args[0].text == non_existent
+                    if not already:
+                        error('{{%s}}: %s macro' % (macro_name, non_existent))
+                    chunk = '{{%s|%s}}' % (macro_name, non_existent)
                 else:
                     macro = cast(Macro, macro)
                     try:
@@ -334,7 +354,7 @@ class Macro:
         return ''.join(chunks)
 
     def _get_args(self, ref: MacroRef) -> \
-            Dict[str, Union[MacroArg, List[MacroArg]]]:
+            dict[str, Union[MacroArg, list[MacroArg]]]:
         args = {}
         exp_args = len(self.args)
         act_args = len(ref.args)
@@ -388,6 +408,34 @@ class Macro:
         return str(arg_spec) if isinstance(arg_spec, (str, numbers.Number)) \
             else arg_spec() if isinstance(arg_spec, type) else None
 
+    # escape macro references, e.g., in deleted text
+    @classmethod
+    def escape(cls, text: str) -> str:
+        if not ('{' in text or '|' in text or '}' in text):
+            return text
+        else:
+            return re.sub(r'([{|}])', r'\\\1', text)
+
+    # unescape previously-escaped macro references
+    @classmethod
+    def unescape(cls, text: str) -> str:
+        if not ('{' in text or '|' in text or '}' in text):
+            return text
+        else:
+            return re.sub(r'\\([{|}])', r'\1', text)
+
+    # clean up by removing some macro references
+    # XXX this is heuristic, and has knowledge of some macros; should get
+    #     all this info from content.py (these methods should be there?)
+    @classmethod
+    def clean(cls, text: str) -> str:
+        if text.startswith(OPEN_DIV) and text.endswith(CLOSE_DIV):
+            text = text[len(OPEN_DIV):-len(CLOSE_DIV)]
+        text = text.replace(CLOSE_DIV + OPEN_DIV, '\n\n')
+        text = text.replace('{{np}}', '\n\n')
+        text = text.replace('{{nl}}', ' ')
+        return text
+
     @property
     def name(self) -> str:
         return self._name
@@ -406,7 +454,7 @@ class Macro:
         return self._final
 
     @property
-    def args(self) -> Dict[str, Any]:
+    def args(self) -> dict[str, Any]:
         return self._args
 
     def __str__(self):

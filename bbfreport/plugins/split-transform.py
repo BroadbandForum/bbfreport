@@ -69,7 +69,7 @@ def split(text: str) -> str:
 visited = set()
 
 
-def visit__has_content(node: _HasContent, logger) -> Any:
+def visit__has_content(node: _HasContent, warning) -> Any:
     """Split `_HasContent` node paragraphs unless already split."""
 
     # ignore if already split
@@ -83,7 +83,7 @@ def visit__has_content(node: _HasContent, logger) -> Any:
     # XXX this can also happen if the transform is specified multiple
     #     times on the command line
     elif (node_id := id(node)) in visited:
-        logger.warning_func('%s: already visited' % node.nicepath)
+        warning('already visited')
 
     # otherwise, split paragraphs and note that it's been visited
     else:

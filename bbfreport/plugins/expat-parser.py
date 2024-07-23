@@ -1,6 +1,6 @@
 """Expat XML parser plugin."""
 
-# Copyright (c) 2019-2021, Broadband Forum
+# Copyright (c) 2019-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -40,25 +40,24 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
+import os
 import xml.parsers.expat
 
 from typing import Optional
 
+from ..exception import ParserException
+from ..logging import Logging
 from ..parser import Data, Parser
 from ..utility import Utility
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class ExpatParser(Parser):
     """Expat XML parser plugin."""
 
-    def __init__(self, name: Optional[str] = None):
-        super().__init__(name)
+    def __init__(self, name: Optional[str] = None, **kwargs):
+        super().__init__(name, **kwargs)
         self._path = None
         self._parser = None
         self._entities = None
@@ -92,8 +91,11 @@ class ExpatParser(Parser):
         self._entities = {}
         self._item = []
         self._stack = []
-        # XXX can we get better error messages? at minimum identify the file
-        self._parser.ParseFile(open(path, 'r+b'))
+        try:
+            self._parser.Parse(open(path, 'r+b').read())
+        except xml.parsers.expat.ExpatError as error:
+            # add the filename
+            raise ParserException('%s: %s' % (os.path.basename(path), error))
         assert len(self._stack) == 0
 
         # return the parse tree

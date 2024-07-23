@@ -40,20 +40,16 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
-
-from .utility import Utility
+from .logging import Logging
 from .visitor import Visitor
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class Format(Visitor):
     """Format (output format) base class.
     """
 
-
-Format.register()
+    most_specific_only: bool = True
+    """For formats, `Visitor._visit_node` should call only the most specific 
+    method."""

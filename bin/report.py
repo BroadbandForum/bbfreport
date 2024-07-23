@@ -83,21 +83,16 @@ assert sys.version_info[:2] >= MIN_VERSION, "You're using python %d.%d; you " \
 # directory into the search path, so we can directly execute the tool from
 # the code
 try:
-    from bbfreport import BBFReportException, Format, Null, Parser, Plugin, \
-        Root, Transform, Utility, version
+    from bbfreport import BBFReportException, Format, LayoutDoc, Logging, \
+        Null, Parser, Plugin, Root, Transform, Utility, version
 except ModuleNotFoundError:
     sys.path.insert(0, os.getcwd())
-    from bbfreport import BBFReportException, Format, Null, Parser, Plugin, \
-        Root, Transform, Utility, version
+    from bbfreport import BBFReportException, Format, LayoutDoc, Logging, \
+        Null, Parser, Plugin, Root, Transform, Utility, version
+
+logger = Logging.get_logger(__file__, ispath=True)
 
 nice_list = Utility.nice_list
-
-# XXX want just the name part; need some utilities / rules / conventions
-prog_basename = os.path.basename(__file__)
-(prog_root, _) = os.path.splitext(prog_basename)
-logger = logging.getLogger(prog_root)
-logger.addFilter(
-        lambda r: r.levelno > 20 or prog_root in Utility.logger_names)
 
 # XXX should change everywhere to use list.append(item) rather than += [item]?
 
@@ -124,7 +119,7 @@ def get_argparser(argv=None, opts=None):
     default_loggername = ['report']
 
     formatter_class = argparse.RawDescriptionHelpFormatter
-    arg_parser = argparse.ArgumentParser(prog=prog_basename,
+    arg_parser = argparse.ArgumentParser(prog=os.path.basename(__file__),
                                          description=__doc__,
                                          fromfile_prefix_chars='@',
                                          formatter_class=formatter_class,
@@ -140,7 +135,7 @@ def get_argparser(argv=None, opts=None):
                                  "files specified on the command line)")
     arg_parser.add_argument("-C", "--nocurdir", action="store_true",
                             help="don't automatically search the current "
-                                 "directory")
+                                 "directory for plugins and XML files")
     arg_parser.add_argument("-F", "--filter", type=str, action="append",
                             default=default_filter,
                             help="filter specification, which is applied just "
@@ -173,11 +168,19 @@ def get_argparser(argv=None, opts=None):
                                  "nodes even if they're not used (only "
                                  "affects the output format; has no  effect "
                                  "on transforms)")
+    arg_parser.add_argument("-B", "--brief", action="store_true",
+                            help="request the output format to generate a "
+                                 "brief report (only affects the output "
+                                 "format; has no  effect on transforms)")
     arg_parser.add_argument("-S", "--show", action="store_true",
                             help="request the output format to highlight "
                                  "nodes that were added in the latest "
                                  "version (only affects the output format; "
                                  "has no  effect on transforms)")
+    arg_parser.add_argument("-E", "--ignore-transform-errors",
+                            action="store_true",
+                            help="ignore errors from transforms when "
+                                 "calculating the exit code")
     # XXX should use a different logger for this?
     arg_parser.add_argument("-D", "--debugpath", type=str,
                             help="path to debug (regular expression); if "
@@ -207,16 +210,16 @@ def get_argparser(argv=None, opts=None):
     if args.debugpath:
         if loglevel_map[args.loglevel] > logging.INFO:
             args.loglevel = 'info'
+        if 'node' not in args.loggername:
+            args.loggername.append('node')
 
     logging.basicConfig(level=loglevel_map[args.loglevel])
 
-    # for logger names to be honored, modules should define loggers and
-    # filters like this:
-    #   logger_name = __name__.split('.')[-1]
-    #   logger = logging.getLogger(logger_name)
-    #   logger.addFilter(
-    #         lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
-    Utility.logger_names = set(args.loggername)
+    # for logger names to be honored, modules should define loggers like this:
+    #   logger = Logging.get_logger(__name__)
+    # XXX this should be a method, which should check that all the logger
+    #     names are valid
+    Logging.names = set(args.loggername)
 
     # XXX do we really need to deprecate them?
     if False and args.loglevel in deprecated_loglevels:
@@ -224,8 +227,12 @@ def get_argparser(argv=None, opts=None):
             args.loglevel,
             logging.getLevelName(loglevel_map[args.loglevel]).lower()))
 
+    # internal transforms are performed automatically and can't be selected
+    # via the --transform argument
+    internal_transforms = ['used', 'lint']
+
     # import all plugins
-    Plugin.import_all(plugindirs=args.plugindir)
+    Plugin.import_all(plugindirs=args.plugindir, nocurdir=args.nocurdir)
 
     # give parsers, transforms and formats the opportunity to add arguments
     # XXX should catch exceptions here, e.g. if invalid arguments are added
@@ -234,11 +241,9 @@ def get_argparser(argv=None, opts=None):
     Format.add_arguments(arg_parser)
 
     # argparse assistants
-    parser_names = sorted(p.name() for p in Parser.items(nohidden=True))
-    transform_names = sorted(t.name() for t in Transform.items(
-            nohidden=True, nobase=True)) + ['<transform>.py']
-    format_names = sorted(f.name() for f in Format.items(
-            nohidden=True, nobase=True)) + ['<format>.py']
+    parser_names = Parser.items(exclude=['parser'])
+    transform_names = Transform.items(exclude=internal_transforms)
+    format_names = Format.items()
 
     def raise_argument_type_error(name, choices):
         choices_ = nice_list(choices, style='argparse')
@@ -251,16 +256,14 @@ def get_argparser(argv=None, opts=None):
             raise_argument_type_error(name, parser_names)
         return parser
 
-    def transform_create(name, *, internal: bool = False) -> Transform:
-        transform = Transform.create(name, plugindirs=args.plugindir,
-                                     internal=internal, args=args)
+    def transform_create(name) -> Transform:
+        transform = Transform.create(name, args=args)
         if not transform:
             raise_argument_type_error(name, transform_names)
         return transform
 
-    def format_create(name, *, internal: bool = False) -> Format:
-        format_ = Format.create(name, plugindirs=args.plugindir,
-                                internal=internal, args=args)
+    def format_create(name) -> Format:
+        format_ = Format.create(name, args=args)
         if not format_:
             raise_argument_type_error(name, format_names)
         return format_
@@ -297,11 +300,8 @@ def get_argparser(argv=None, opts=None):
 
     # 'before' and 'after' transforms
     # XXX there should be a more general list of 'before' and 'after' xforms
-    # XXX there should be a way of suppressing the 'used' and/or 'lint'
-    #     transforms; or use the log level?
     transforms_before = []
-    transforms_after = [transform_create('used', internal=True),
-                        transform_create('lint', internal=True)]
+    transforms_after = [transform_create(name) for name in internal_transforms]
 
     # set options for the caller
     if opts is not None:
@@ -325,6 +325,20 @@ def main(argv=None):
     namespace = opts.get('namespace', None)
     args = arg_parser.parse_args(argv_remaining, namespace=namespace)
 
+    # count errors for use as the exit code
+    class ErrorHandler(logging.Handler):
+        def __init__(self):
+            super().__init__(logging.ERROR)
+            self.enabled = True
+            self.count = 0
+
+        def emit(self, record):
+            if self.enabled:
+                self.count += 1
+
+    error_handler = ErrorHandler()
+    logger.root.addHandler(error_handler)
+
     # warn about deprecated arguments (use the minimum valid abbreviations)
     deprecated = [arg for dep in {'--outf'}
                   for arg in argv if arg[:len(dep)] == dep]
@@ -333,6 +347,7 @@ def main(argv=None):
                 deprecated))
 
     # handle --version
+    # noinspection PyTestUnpassedFixture
     if args.version:
         sys.stderr.write('%s\n' % version())
 
@@ -343,7 +358,14 @@ def main(argv=None):
     # rename a few arguments
     # XXX could use 'dest' but that shows up in the command line help
     args.dirs = args.include
+    # XXX this is temporary until HTML is generated directly (it prevents
+    #     transform errors from aborting 'make' and preventing pandoc from
+    #     being run)
+    # noinspection PyProtectedMember
+    if args.format._name == 'markdown':
+        args.ignore_transform_errors = True
     logger.debug('arguments %s' % args)
+
     # XXX need to provide arguments to control profiling; what to profile
     #     and how/where to report the results
     if args.profile:
@@ -360,15 +382,12 @@ def main(argv=None):
         logger.debug('recursion limit %r -> %r' % (limit,
                                                    sys.getrecursionlimit()))
 
-    # the return value is the error count
-    errors = 0
-
     # allow plugins to request an early exit by returning True (any plugins
     # that do this should output an explanatory message)
+    # XXX this is regarded as an error; should it be?
     if any(transform.post_init(args) for transform in transforms) or \
             args.format.post_init(args):
-        logger.info('transform or format requested early exit')
-        errors += 1
+        logger.error('transform or format requested early exit')
     else:
         root = Root(args=args)
         for file in args.file:
@@ -382,16 +401,19 @@ def main(argv=None):
                     file, (time.time() - start) * 1000))
             except Exception as e:
                 logger.error('%s: %s' % (type(e).__name__, e))
-                errors += 1
                 if isinstance(e, (
-                        AssertionError, AttributeError, BBFReportException,
-                        FileNotFoundError, KeyError, NameError, RecursionError,
+                        AssertionError, AttributeError, FileNotFoundError,
+                        KeyError, IndexError, NameError, RecursionError,
                         TypeError, ValueError)):
                     raise
                 else:
                     continue
 
         if root.xml_files:
+            # XXX this will presumably also ignore format errors? intended?
+            if args.ignore_transform_errors:
+                error_handler.enabled = False
+
             for transform in transforms:
                 logger.info("performing '%s' transform" % transform)
                 start = time.time()
@@ -401,8 +423,14 @@ def main(argv=None):
 
             logger.info("generating '%s' format" % args.format)
             start = time.time()
-            args.format.visit(root, omit_if_unused=not args.all)
+            result = args.format.visit(root, omit_if_unused=not args.all)
             logger.info("generated  '%s' format in %d ms" % (
+                    args.format, (time.time() - start) * 1000))
+            if isinstance(result, (LayoutDoc, str)):
+                logger.info("rendering  '%s' format" % args.format)
+                start = time.time()
+                args.output.write(str(result))
+                logger.info("rendered   '%s' format in %d ms" % (
                     args.format, (time.time() - start) * 1000))
             if str(args.format) != 'null' and args.output is not sys.stdout:
                 logger.info("wrote '%s'" % args.output.name)
@@ -417,7 +445,9 @@ def main(argv=None):
         stats.print_callers(20)
         stats.print_callees(20)
 
-    return errors
+    # some shells can't handle exit codes greater than 127
+    logger.info('exit code %d' % min(error_handler.count, 127))
+    return min(error_handler.count, 127)
 
 
 if __name__ == "__main__":

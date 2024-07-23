@@ -42,25 +42,22 @@
 
 import argparse
 import json
-import logging
 import pprint
 
-from typing import Optional, Tuple, Union
+from typing import Optional, Union
 
 from .exception import ParserException
+from .logging import Logging
 from .plugin import Plugin
 from .utility import Utility
 
 # common type aliases
 # this is more accurate but produces very confusing documentation
-# Data = Tuple[Tuple[str, Union[str, 'Data']], ...]
+# Data = tuple[tuple[str, Union[str, 'Data']], ...]
 # so use this
-Data = Tuple[Tuple[str, Union[str, Tuple]], ...]
+Data = tuple[tuple[str, Union[str, tuple]], ...]
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 # XXX need at least one validating parser; pyxb validates but is slow, and
@@ -87,9 +84,10 @@ class Parser(Plugin):
             The parsed data as a nested tuple.
         """
 
-        mandatory = {'thisonly', 'parser_dump_json', 'parser_dump_tuple',
-                     'parser_warn_tabs'}
-        assert args and all({hasattr(args, a) for a in mandatory})
+        mandatory = ['thisonly', 'parser_dump_json', 'parser_dump_tuple',
+                     'parser_warn_tabs']
+        assert args and all({hasattr(args, a) for a in mandatory}), \
+            'missing mandatory arguments; one of more of %s' % mandatory
 
         # parse the file to a nested tuple
         data = self._parse(path, warn_tabs=args.parser_warn_tabs,
@@ -258,7 +256,7 @@ class Parser(Plugin):
             information.
         """
 
-        raise NotImplementedError('unimplemented %r._parse()' % type(
+        raise NotImplementedError('unimplemented %s._parse()' % type(
                 self).__name__)
 
     # XXX should put some utilities in a lower-level class that Node can use
@@ -288,9 +286,10 @@ class Parser(Plugin):
 
 
 # this is just to add some generic parser arguments
-class _Parser(Parser):
+# (its canonical name is 'parser-parser')
+class ParserParser(Parser):
     @classmethod
-    def _add_arguments(cls, arg_parser):
+    def _add_arguments(cls, arg_parser, **kwargs):
         arg_group = arg_parser.add_argument_group('generic parser arguments')
         arg_group.add_argument('--parser-dump-json', action='store_true',
                                help='dump parse results to JSON')
@@ -300,8 +299,6 @@ class _Parser(Parser):
                                help='warn of any TAB characters')
         return arg_group
 
-    def _parse(self, path: str, **kwargs) -> Data:
-        return super()._parse(path, **kwargs)
 
-
-_Parser.register()
+# need explicit registration because this isn't in the plugins directory
+ParserParser.register()

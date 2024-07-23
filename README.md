@@ -236,6 +236,57 @@ logger name is `lint. Here's an example.
     INFO:report:generating 'null' format
     INFO:report:generated  'null' format in 0 ms
 
+## Running pandoc
+
+The report tool doesn't yet generate HTML directly. To generate HTML, use the
+`markdown` format to generate markdown, and then run [pandoc] to generate HTML.
+
+The `markdown` format generates an extended version of [commonmark]
+(referred to as commonmark_x). To process it, you need to install the
+following:
+
+* pandoc 3.0 or later: This might already be installed, or you might
+be able to install it using the OS package manager. If not, you can get it
+from <https://github.com/jgm/pandoc/releases>
+
+* list-table filter: Get this from
+<https://github.com/pandoc-ext/list-table>
+
+* logging library: Get this from
+<https://github.com/pandoc-ext/logging>
+
+* custom HTML writer: Get this from
+<https://github.com/BroadbandForum/pandoc-html-writer>
+
+Assuming that you've already installed pandoc, and that you want to process
+`model.md`, you can do this:
+
+% git clone https://github.com/pandoc-ext/list-table
+Cloning into 'list-table'...
+...
+% ln -s list-table/list-table.lua
+
+% git clone https://github.com/pandoc-ext/logging
+Cloning into 'logging'...
+...
+% ln -s logging/logging.lua
+
+% git clone https://github.com/BroadbandForum/pandoc-html-writer
+Cloning into 'pandoc-html-writer'...
+...
+% ln -s pandoc-html-writer/html-writer.lua
+% ln -s pandoc-html-writer/html-derived-writer.lua
+
+% report.py model.xml --format markdown --output model.md
+
+% pandoc model.md --standalone --from commonmark_x --lua-filter list-table.lua --to html-derived-writer.lua --output model.html
+
+Refer to the pandoc documentation for more information, e.g., on how to
+avoid the need for the soft links.
+
+[commonmark]: https://commonmark.org
+[pandoc]: https://pandoc.org
+
 ## Notes
 
 * The distribution doesn't contain any sample DM instances, so you have to

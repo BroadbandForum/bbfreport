@@ -4,7 +4,7 @@ columns = {
     'Name': lambda item: item.name,
     'Type': lambda item: (item.syntax.primitive_inherited
                           if item.typename == 'parameter' else item.typename),
-    'Write': lambda item: write_string(getattr(item, 'access', '')),
+    'Write': lambda item: access_string(getattr(item, 'access', '')),
     'Description': lambda item: (
             item.description.content.markdown.strip() or ''),
     'Object Default': lambda item: (
@@ -16,9 +16,12 @@ columns = {
 writer = None
 
 
-def write_string(access):
-    assert access in {'', 'readOnly', 'readWrite'}
-    return {'readOnly': 'R', 'readWrite': 'W'}.get(access, '')
+def access_string(access):
+    access_map = {'readOnly': 'R', 'writeOnceReadOnly': 'WO',
+                  'readWrite': 'W', '': ''}
+    value = access.value if access is not None else ''
+    assert value in access_map, 'unsupported access %s' % value
+    return access_map[value]
 
 
 def _begin_(_, args):
@@ -37,14 +40,12 @@ def visit__model_item(item):
 # alternative; visit__model_item() will be called too (is this wrong?)
 # noinspection PyUnresolvedReferences,PyUnusedLocal
 def visit_parameter(param):
-    # XXX this is temporarily disabled
-    return
     # noinspection PyUnreachableCode
     assert writer is not None
     writer.writerow(
             {'Name': param.name,
              'Type': param.syntax.primitive_inherited,
-             'Write': write_string(param.access),
+             'Write': access_string(param.access),
              'Description': param.description.content.markdown.strip() or '',
              'Object Default': (param.syntax.default.value if
                                 param.syntax.default.type == 'object' else ''),

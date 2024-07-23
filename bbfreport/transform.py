@@ -40,20 +40,13 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-import logging
-
+from .logging import Logging
 from .visitor import Visitor
-from .utility import Utility
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+logger = Logging.get_logger(__name__)
 
 
 class Transform(Visitor):
     """Transform base class.
     """
 
-
-Transform.register()

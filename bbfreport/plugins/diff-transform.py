@@ -1,6 +1,6 @@
-"""Diffs transform plugin."""
+"""Diff transform plugin."""
 
-# Copyright (c) 2023, Broadband Forum
+# Copyright (c) 2023-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -49,17 +49,18 @@ import time
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, cast, Dict, List, Optional, Set, Union
+from typing import Any, Optional, Union
 
 from ..macro import Macro
-from ..node import (Description, _HasContent, Model, _ModelItem, Node,
-                    _ProfileItem, Root, _ValueFacet)
+from ..node import DataTypeRef, Description, _HasContent, Model, _ModelItem, \
+    Node, Root, _ValueFacet
 from ..path import relative_path
+from ..utility import ScopeEnum
 
-Diffs = Dict[Union[_ModelItem, _ValueFacet], List['Diff']]
+Diffs = dict[Union[_ModelItem, _ValueFacet], list['Diff']]
 
-# XXX need to optimize object_elems, which calls object_objects, which calls
-#     objpath; object_elems is only needed to associate object addition and
+# XXX need to optimize h_elems, which calls h_objects, which calls
+#     objpath; h_elems is only needed to associate object addition and
 #     deletion with the correct parent; everything is much better if
 #     _path_split is cached
 time_it = False
@@ -124,24 +125,17 @@ class Diff:
             if str(self.elem) != name:
                 text += ' %s' % self.elem
         elif self.entity == Entity.content:
-            # XXX heuristic conversion of a list of macro references and
-            #     strings to a single string (it should be in macro.py)
-            def as_string(c) -> str:
-                s = ''.join(str(x) for x in c)
-                r = re.sub(r'^{{div\|{{classes}}\|(.*)}}$', r'\1', s)
-                r = r.replace('}}{{div|{{classes}}|', '\n\n')
-                r = r.replace('{{nl}}', '\n')
-                return r
-
             i1, i2, c1 = self.value
             j1, j2, c2 = self.value2
             if i2 > i1:
-                text += ' %r' % as_string(c1)
+                text += ' %r' % Macro.clean(''.join(str(c) for c in c1))
             if i2 > i1 and j2 > j1:
                 text += ' ->'
             if j2 > j1:
-                text += ' %r' % as_string(c2)
+                text += ' %r' % Macro.clean(''.join(str(c) for c in c2))
         return text
+
+    __repr__ = __str__
 
 
 # need two files on the command line
@@ -205,8 +199,13 @@ def visit(root: Root, args, logger) -> Optional[bool]:
     def emph_str(txt: str) -> str:
         return '*%s*' % txt if txt else '""'
 
+    def elem_typ(nod: Node) -> str:
+        # omitting 'dataTypeRef' is cosmetic
+        return {'dataTypeRef': ''}.get(nod.typename, nod.typename)
+
     def elem_str(nod: Node) -> str:
-        return relative_path(nod.objpath, new_node.objpath, scope='absolute') \
+        return relative_path(nod.objpath, new_node.objpath,
+                             scope=ScopeEnum('absolute')) \
             if isinstance(nod, _ModelItem) else val if (val := str(nod)) \
             else ''
 
@@ -219,8 +218,10 @@ def visit(root: Root, args, logger) -> Optional[bool]:
             else emph_nod(nod)
 
     def emph_nod(nod: Node) -> str:
-        # note the trailing space
-        return '*%s* ' % val if (val := elem_str(nod)) else ''
+        return '*%s*' % val if (val := elem_str(nod)) else ''
+
+    def elem_flt(ctx: str, val: str, term: str = '') -> str:
+        return val + term if val not in ctx else ''
 
     # add {{diffs}} macros to the second model
     # XXX and content changes
@@ -237,89 +238,125 @@ def visit(root: Root, args, logger) -> Optional[bool]:
         any_cont_diff = any(d.entity == Entity.content
                             and not d.is_whitespace for d in model_item_diffs)
         for model_item_diff in model_item_diffs:
-            # the node that changed
-            old_node, new_node = \
-                model_item_diff.old_node, model_item_diff.new_node
-            str_new_node = str(new_node)
+            old_node, new_node, entity, operation, name, value, value2 = (
+                model_item_diff.old_node, model_item_diff.new_node,
+                model_item_diff.entity, model_item_diff.operation,
+                model_item_diff.name, model_item_diff.value,
+                model_item_diff.value2)
+
+            # these are used for various tests and messages
+            node = old_node if operation == Operation.removed else new_node
+            str_node = str(node)
+
+            # ignore some data type changes; this is primarily intended to
+            # ignore Alias -> _AliasUSP changes (and currently these are the
+            # only changes that it catches)
+            if isinstance(old_node, DataTypeRef) and \
+                    str(new_node) == str(old_node) and \
+                    new_node.base != old_node.base:
+                logger.info('%s: ignored %s %s -> %s change' % (
+                    node.nicepath, node.typename, old_node.base,
+                    new_node.base))
+                continue
+
+            # omit dataTypeRef base when ref is also specified (cosmetic)
+            if isinstance(old_node, DataTypeRef) and (entity, name) == (
+                    Entity.attr, 'base') and node.ref:
+                logger.info('%s: ignored attribute base = %s because ref '
+                            '= %s is specified' % (
+                                node.nicepath, value, node.ref))
+                continue
+
+            # ignore some attribute removals
+            if (entity, operation, name, str(value)) in {
+                (Entity.attr, Operation.removed, 'access', 'readOnly'),
+                (Entity.attr, Operation.removed, 'minEntries', '1'),
+                (Entity.attr, Operation.removed, 'maxEntries', '1')}:
+                logger.info('%s: ignored removed attribute %s = %s' % (
+                    node.nicepath, name, value))
+                continue
 
             # if the node matches --debugpath, log at the info level
             logger_func = logger.info if args.debugpath and re.search(
                     args.debugpath, new_node.debugpath) else logger.debug
-
-            # ignore whitespace-only changes
-            # XXX should be able to control this
-            if not model_item_diff.is_whitespace:
-                logger_func('%s %s %s' % (new_node.nicepath, new_node.typename,
-                                          model_item_diff))
+            logger_func('%s %s %s' % (node.nicepath, node.typename,
+                                      model_item_diff))
 
             # unhide the changed node and its ancestors (and their
             # description elements)
             if any_attr_diff or any_elem_diff or any_cont_diff:
-                new_node.object_unhide(description=True, upwards=True)
+                new_node.h_unhide(description=True, upwards=True)
                 # logger.debug('%s %s (and up) unhidden' % (
                 #     new_node.nicepath, new_node.typename))
 
             # provide some additional context if the model item node isn't the
             # new node (the node that changed); it will always be an ancestor
             context = ''
-            if str_new_node != str_model_item:
+            if str_node != str_model_item:
                 # don't include content (e.g, descriptions) in the context;
                 # also don't include it if it essentially duplicates typename
-                if not isinstance(new_node, _HasContent) and str_new_node != \
-                        '' and new_node.typename not in str_new_node:
-                    context += '*%s* ' % str_new_node
-                context += '%s ' % new_node.typename
+                if not isinstance(node, _HasContent) and str_node != \
+                        '' and node.typename not in str_node and \
+                        (value2 or '') != str_node:
+                    context += '*%s* ' % str_node
+                context += '%s ' % node.typename
 
-            if model_item_diff.entity == Entity.attr:
-                operation, name, value, value2 = (
-                    model_item_diff.operation, model_item_diff.name,
-                    model_item_diff.value, model_item_diff.value2)
-                macro_arg = '%s %sattribute %s = %s%s' % (
-                    operation.name.capitalize(), context, emph_str(name),
-                    emph_str(value), ' &rArr; %s' % emph_str(value2) if
-                    value2 is not None else '')
+            if entity == Entity.attr:
+                # XXX I can't decide whether to include 'attribute ' here
+                include_attribute = False
+                attribute = 'attribute ' if include_attribute else ''
+                macro_arg = '%s %s%s%s = %s%s' % (
+                    operation.name.capitalize(), context, attribute, name,
+                    emph_str(value), ' &rArr; %s' % emph_str(
+                            value2) if value2 is not None else '')
                 macro_args.append(macro_arg)
 
-            elif model_item_diff.entity == Entity.elem:
-                elem, typename = \
-                    model_item_diff.elem, model_item_diff.elem.typename
-                if model_item_diff.operation == Operation.added:
-                    macro_args.append('Added %s%s %s' % (
-                        context, elem_ref(elem), typename))
+            elif entity == Entity.elem:
+                elem = model_item_diff.elem
+                if operation == Operation.added:
+                    ref = elem_flt(context, elem_ref(elem), term=' ')
+                    typ = elem_flt(context, elem_typ(elem))
+
+                    # try to convert 'Removed OLD TYP' and 'Added NEW TYP' to
+                    # 'Changed TYP = OLD -> NEW'
+                    new_arg = 'Added %s%s%s' % (context, ref, typ)
+                    if macro_args and (old_arg := macro_args[-1]):
+                        old_words, new_words = old_arg.split(), new_arg.split()
+                        if len(old_words) > 2 and len(new_words) > 2 and \
+                                old_words[0] == 'Removed' and new_words[2] == \
+                                old_words[2]:
+                            new_arg = 'Changed %s = %s -> %s' % (
+                                new_words[2], old_words[1], new_words[1])
+                            del macro_args[-1]
+
+                    macro_args.append(new_arg)
                     # unhide the new elem, its children and ancestors
-                    elem.object_unhide(upwards=False)
-                    elem.object_unhide(upwards=True)
+                    elem.h_unhide(upwards=False)
+                    elem.h_unhide(upwards=True)
                     # logger.debug('%s %s (and down and up) unhidden' % (
                     #     elem.nicepath, elem.typename))
-                elif model_item_diff.operation == Operation.removed:
+                elif operation == Operation.removed:
+                    ref = elem_flt(context, elem_ref(elem), term=' ')
+                    typ = elem_flt(context, elem_typ(elem))
                     # we won't try to reference it; it's no longer there!
-                    macro_args.append('Removed %s%s%s' % (
-                        context, emph_nod(elem), typename))
+                    macro_args.append('Removed %s%s %s' % (context, ref, typ))
 
-            elif model_item_diff.entity == Entity.content:
-                assert model_item_diff.operation == Operation.changed, \
-                    'invalid operation %s' % model_item_diff.operation.name
-                old_body = old_node.content.body_as_list
-                new_body = new_node.content.body_as_list
+            elif entity == Entity.content:
+                assert operation == Operation.changed, \
+                    'invalid operation %s' % operation.name
+                old_body = old_node.content.get_body_as_list(collapse=True)
+                new_body = new_node.content.get_body_as_list(collapse=True)
 
-                tag = model_item_diff.name
-                i1, i2, _ = model_item_diff.value
-                j1, j2, _ = model_item_diff.value2
+                tag = name
+                i1, i2, _ = value
+                j1, j2, _ = value2
 
                 # XXX explain this and use better variable names
                 if j1 > j:
                     body.extend(new_body[j:j1])
 
                 # escape special characters in 'old'
-                # XXX shouldn't use strings here?
-                # XXX should have a method for this; cf re.escape()
-                # XXX quoted '{' and '}' can cause problems with macro parsing;
-                #     pending fixing these, use '\|' (in the right order! a
-                #     regex would be better)
-                old = ''.join(str(s)
-                              .replace(r'|', r'\|')
-                              .replace(r'{{', r'\|')
-                              .replace(r'}}', r'\|') for s in old_body[i1:i2])
+                old = ''.join(Macro.escape(str(s)) for s in old_body[i1:i2])
                 new = ''.join(str(s) for s in new_body[j1:j2])
                 if tag == 'replace':
                     # XXX this can cause problems when old closes a macro and
@@ -352,28 +389,17 @@ def visit(root: Root, args, logger) -> Optional[bool]:
                 model_item.description = Description(data=(('content', ()),))
             footer = '{{diffs|%s}}' % '|'.join(macro_args)
             model_item.description.content.footer = footer
-            logger.debug('%s %s footer %r (%r)' % (
-                model_item.nicepath, model_item.typename, footer,
-                model_item.description.content.footer))
+            logger.debug('%s %s footer %r' % (
+                model_item.nicepath, model_item.typename, footer))
 
         if new_node:
             if new_body and 0 < j < len(new_body):
                 body.extend(new_body[j:])
             if body:
-                # XXX this is horrible; should be able to use Content / str
-                #     methods directly
-                # XXX what's more, it's wrong, because it includes the wrapping
-                #     divs, which makes 'content_plus' wrong (adding content
-                #     should be inline/block aware; cf pandoc!)
-                # XXX could/should use args.debugpath-aware logger_func() but
-                #     will defer this until the above problems have been fixed
                 content = ''.join(str(s) for s in body)
                 footer = model_item.description.content.footer
                 model_item.description.content = content
                 model_item.description.content.footer = footer
-                logger.debug('%s %s content %r)' % (
-                    model_item.nicepath, model_item.typename,
-                    content.replace('\\', '')))
 
     logger.debug('appended {{diffs}} macro refs: %s' % ', '.join(
             '%s %s = %s' % (ent.name, op.name, val) for (ent, op), val in
@@ -382,6 +408,7 @@ def visit(root: Root, args, logger) -> Optional[bool]:
 
 # attr names and node typenames to ignore when comparing nodes
 # XXX I'm not sure whether or not to include 'functional' here
+# XXX it would be better not to ignore them, but not always to report them
 # XXX profiles are complicated, so ignore them for now
 ignored_attrnames = {'action', 'activeNotify', 'dmr_previousParameter',
                      'dmr_previousObject', 'dmr_previousCommand',
@@ -429,7 +456,7 @@ def node_diffs(old_node: Node, new_node: Node, *,
 
     # elements are a bit harder (it depends on whether they're keyed)
     elem2s_both = set()
-    for elem1 in old_node.object_elems:
+    for elem1 in old_node.h_elems:
         # should this element be ignored?
         if elem1.typename in ignored_typenames:
             continue
@@ -437,66 +464,31 @@ def node_diffs(old_node: Node, new_node: Node, *,
         # XXX new_node won't contain an item with the same key; need to know
         #     how many components to ignore; for now, assume 1 (the name of
         #     the file that defined the model; see node.py Model._calckey())
-        elem2s = [elem2 for elem2 in new_node.object_elems if
+        elem2s = [elem2 for elem2 in new_node.h_elems if
                   elem2.typename == elem1.typename and (
                           not elem2.key or elem2.key[1:] == elem1.key[1:])]
+
+        # if there are multiple matches, try str()
+        if len(elem2s) > 1:
+            elem2s = [elem2 for elem2 in new_node.h_elems if
+                      elem2.typename == elem1.typename and
+                      str(elem2) == str(elem1)]
+
+        # if there are no matches, it's been removed (this should be
+        # highlighted by the format)
         if not elem2s:
+            # XXX this might not be the best criterion
+            func = logger.error if isinstance(elem1, _ModelItem) else \
+                logger.info
+            func('%s: removed %s %s' % (
+                old_node.nicepath, elem1.typename, elem1.keylast or elem1))
             Diff.append(diffs, old_node, new_node, Entity.elem,
                         Operation.removed, elem=elem1)
             continue
 
-        # if there are multiple matches, try str()
-        # XXX could try this first, but str() might be expensive?
+        # if there are multiple matches, it's an error
         if len(elem2s) > 1:
-            elem2s_maybe = [elem2 for elem2 in new_node.object_elems if
-                            elem2.typename == elem1.typename and
-                            str(elem2) == str(elem1)]
-            if elem2s_maybe:
-                elem2s = elem2s_maybe
-
-        # if there are multiple matches, try the 'value' attribute (this
-        # will catch enumerations and patterns)
-        # XXX perhaps should treat these as keyed?
-        # XXX str() catches all these? no longer need this
-        if False and len(elem2s) > 1:
-            elem2s_maybe = [elem2 for elem2 in new_node.object_elems if
-                            elem2.typename == elem1.typename and
-                            hasattr(elem2, 'value') and
-                            cast(_ValueFacet, elem2).value ==
-                            cast(_ValueFacet, elem1).value]
-            if elem2s_maybe:
-                elem2s = elem2s_maybe
-
-        # if there are multiple matches, try the 'ref' attribute (this
-        # will catch profile references)
-        # XXX perhaps should treat these as keyed?
-        # XXX str() catches all these? no longer need this
-        if False and len(elem2s) > 1:
-            elem2s_maybe = [elem2 for elem2 in new_node.object_elems if
-                            elem2.typename == elem1.typename and
-                            hasattr(elem2, 'ref') and
-                            cast(_ProfileItem, elem2).ref ==
-                            cast(_ProfileItem, elem1).ref]
-            if elem2s_maybe:
-                elem2s = elem2s_maybe
-
-        # if there are still multiple matches, try the child elems' 'ref'
-        # attributes (this will catch unique keys)
-        # XXX use _ProfileItem here because unique keys use ParameterRef
-        # XXX perhaps should treat these as keyed?
-        if False and len(elem2s) > 1:
-            def child_refs(nod: Node) -> Set[str]:
-                return {cast(_ProfileItem, ele).ref for ele in nod.object_elems
-                        if hasattr(ele, 'ref')}
-
-            elem2s_maybe = [elem2 for elem2 in new_node.object_elems if
-                            elem2.typename == elem1.typename and child_refs(
-                                    elem1) == child_refs(elem2)]
-            if elem2s_maybe:
-                elem2s = elem2s_maybe
-
-        if len(elem2s) > 1:
-            elem2s_for_report = [elem2.key or elem2 for elem2 in elem2s]
+            elem2s_for_report = [elem2.keylast or elem2 for elem2 in elem2s]
             logger.error('%s: multiple %s matches %s' % (
                 old_node.nicepath, elem1.typename, elem2s_for_report))
             continue
@@ -508,7 +500,7 @@ def node_diffs(old_node: Node, new_node: Node, *,
         elem2s_both.add(elem2)
 
     # check for added elems
-    elem2s_added = [elem2 for elem2 in new_node.object_elems if
+    elem2s_added = [elem2 for elem2 in new_node.h_elems if
                     elem2.typename not in ignored_typenames and
                     elem2 not in elem2s_both]
     for elem2 in elem2s_added:
@@ -522,8 +514,8 @@ def node_diffs(old_node: Node, new_node: Node, *,
         cont1 = old_node.content
         cont2 = new_node.content
         if not cont1 or not cont2 or cont2 != cont1:
-            body1 = cont1.body_as_list
-            body2 = cont2.body_as_list
+            body1 = cont1.get_body_as_list(collapse=True)
+            body2 = cont2.get_body_as_list(collapse=True)
             matcher = difflib.SequenceMatcher(None, body1, body2)
             done_header = False
             for tag, i1, i2, j1, j2 in matcher.get_opcodes():
@@ -547,22 +539,19 @@ def node_diffs(old_node: Node, new_node: Node, *,
 
                 # this is a whitespace-only change, and is due to paragraph
                 # wrapping
-                # XXX this doesn't sound quite right; {{np}} should trigger
-                #     a new {{div}}, but why {{np}}?
                 # XXX for now, take the easy way out and compare them as
                 #     strings (will redo this later)
                 # XXX should generalize this to check for any 'close then
                 #     open' within a chunk, because this is harder to handle
-                if str(chunk1) == '[call(nl)]' and str(chunk2) == \
-                        '[close(div), open(div), call(classes), argsep(|)]':
+                para_sep = '[close(div), open(div), call(classes), argsep(|)]'
+                space_set = {"[' ']", "'\n\n'" '[call(nl)]', '[call(np)]'}
+                if str(chunk1) in space_set and str(chunk2) == para_sep:
                     is_whitespace = True
 
                 # this is another whitespace-only change, and is due to using
                 # status="append" to append to a description
                 # XXX see the XXX comments to the above case
-                if str(chunk1) == \
-                        '[close(div), open(div), call(classes), argsep(|)]' \
-                        and str(chunk2) == '[call(np)]':
+                if str(chunk1) == para_sep and str(chunk2) in space_set:
                     is_whitespace = True
 
                 # debug: output header if not already done

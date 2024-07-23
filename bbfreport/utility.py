@@ -1,6 +1,6 @@
 """Utilities."""
 
-# Copyright (c) 2019-2023, Broadband Forum
+# Copyright (c) 2019-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -41,23 +41,20 @@
 # license grant are also deemed granted under this license.
 
 import functools
-import logging
 import re
 import os.path
 import textwrap
 import xml.sax.saxutils as saxutils
 
-from typing import Any, Callable, cast, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, cast, Iterable, Optional, \
+    Union
 
-logger_name = __name__.split('.')[-1]
-logger = logging.getLogger(logger_name)
-logger.addFilter(
-        lambda r: r.levelno > 20 or logger_name in Utility.logger_names)
+from .logging import Logging
+
+logger = Logging.get_logger(__name__)
 
 
 # XXX Namespace, Version etc. classes should be moved to (new) types.py
-
-
 class Namespace:
     """Represents an XML namespace."""
 
@@ -136,52 +133,202 @@ class Namespace:
     __repr__ = __str__
 
 
+# XXX this isn't really specific to strings; could look into generics, but this
+#     might require python3.12
+# XXX might this be partly reinventing the standard enum module?
+# XXX note that invalid values are silently permitted but will have an index
+#     of -1 and therefore are "less than" all other values
+# XXX 'level' is a bad name; but is 'index' any better?
+# XXX comparisons with strings are supported; is this good or bad?
+# XXX perhaps comparison with None should work too, with None being the same
+#     as the default value, if there is one, or -1 (see above) otherwise
+# XXX should check everywhere (not just im this module) for incorrect usage of
+#     NotImplemented / NotImplementedError
 @functools.total_ordering
-class Status:
-    # status-related constants; the values are assumed to be defined in
-    # increasing 'deprecation order'
-    default = 'current'
-    names = (default, 'deprecated', 'obsoleted', 'deleted')
-    level_names = {level: name for level, name in enumerate(names)}
-    name_levels = {name: level for level, name in enumerate(names)}
+class StrEnum:
+    """String enumeration base class."""
 
-    def __init__(self, name: Optional[str] = None):
-        assert name is None or name in self.names
-        self._name = name
+    values: tuple[str, ...] = ()
+
+    default: Optional[str] = None
+
+    # instances of different StrEnum subclasses can be compared if they have
+    # the same levels (values should be a subset of levels)
+    levels: dict[Optional[str], int] = {}
+
+    @classmethod
+    def check(cls, owner: str, name: str) -> None:
+        # this is called at module load time so the logging subsystem hasn't
+        # yet been configured and error messages won't be prefixed with the
+        # logger name and the message severity
+        prefix = 'ERROR:%s:' % logger.name
+
+        # check that the default is one of the values
+        if cls.default is not None and cls.default not in cls.values:
+            logger.error('%s%s: invalid %r default %r' % (
+                prefix, owner, name, cls.default))
+
+        # if there are explicit levels, check that the values are a subset
+        if cls.levels:
+            excess = ', '.join(sorted(set(cls.values) - set(cls.levels)))
+            if excess:
+                logger.error('%s%s: excess %r value(s) %r (missing from '
+                             'levels)' % (prefix, owner, name, excess))
+
+    # argument-less constructor means "default"
+    def __init__(self, value: Optional[str] = None):
+        self._value = value
 
     @property
     def defined(self) -> bool:
-        return self._name is not None
+        return self._value is not None
 
     @property
-    def name(self) -> str:
-        return self._name or self.default
+    def value(self) -> Optional[str]:
+        cls = type(self)
+        return self._value or cls.default
 
     @property
-    def level(self) -> str:
-        return self.name_levels[self.name]
+    def levels_(self) -> dict[Optional[str], int]:
+        cls = type(self)
+        return cls.levels or \
+            {name: level for level, name in enumerate(cls.values)}
 
-    def __lt__(self, other: 'Status') -> bool:
-        if not isinstance(other, Status):
-            raise NotImplementedError
-        return self.name_levels[self.name] < self.name_levels[other.name]
+    @property
+    def level(self) -> int:
+        # note use of the 'value' property
+        return self.levels_.get(self.value, -1)
 
-    def __eq__(self, other: 'Status') -> bool:
-        if not isinstance(other, Status):
-            raise NotImplementedError
-        return self.name_levels[self.name] == self.name_levels[other.name]
+    def __lt__(self, other: Union[str, 'StrEnum']) -> bool:
+        cls = type(self)
+        if isinstance(other, str):
+            other = cls(other)
+        elif not isinstance(other, StrEnum) or other.levels_ != self.levels_:
+            return NotImplemented
+        return self.level < other.level
+
+    def __eq__(self, other: Union[str, 'StrEnum']) -> bool:
+        cls = type(self)
+        if isinstance(other, str):
+            other = cls(other)
+        elif not isinstance(other, StrEnum) or other.levels_ != self.levels_:
+            return NotImplemented
+        return self.level == other.level
 
     def __str__(self) -> str:
-        return self.name
+        # note use of the 'value' property, and fallback to ''
+        return self.value or ''
 
-    __repr__ = __str__
+    def __repr__(self) -> str:
+        return repr(str(self))
+
+
+# XXX these classes should be defined elsewhere; some could be local classes
+#     in node.py, but others, e.g. Status, need to be globally available
+
+# XXX StatusEnum doesn't really have a default, but with no default the value
+#     could be None, so we deal with it; can use .defined when necessary
+class StatusEnum(StrEnum):
+    values = ('current', 'deprecated', 'obsoleted', 'deleted')
+    default = 'current'
+
+
+class ActionEnum(StrEnum):
+    values = ('create', 'prefix', 'append', 'replace')
+    default = 'create'
+
+
+# all Access and Requirement classes share the same levels, so their
+# instances can be compared
+class _AccessOrRequirementEnum(StrEnum):
+    levels = {None: 0, 'notSpecified': 1, 'present': 2, 'readOnly': 2,
+              'writeOnceReadOnly': 3, 'create': 4, 'delete': 5,
+              'createDelete': 6, 'readWrite': 6}
+
+
+class ObjectAccessEnum(_AccessOrRequirementEnum):
+    values = ('readOnly', 'readWrite')
+    default = 'readOnly'
+
+
+# noinspection PyPep8Naming
+class Dt_objectAccessEnum(_AccessOrRequirementEnum):
+    values = ('readOnly', 'create', 'delete', 'createDelete')
+    default = 'readOnly'
+
+
+class ParameterAccessEnum(_AccessOrRequirementEnum):
+    values = ('readOnly', 'readWrite', 'writeOnceReadOnly')
+    default = 'readOnly'
+
+
+class FacetAccessEnum(_AccessOrRequirementEnum):
+    values = ('readOnly', 'readWrite')
+    default = 'readWrite'
+
+
+class ObjectRequirementEnum(_AccessOrRequirementEnum):
+    values = ('notSpecified', 'present', 'create', 'delete', 'createDelete')
+
+
+class ParameterRequirementEnum(_AccessOrRequirementEnum):
+    values = ('readOnly', 'readWrite', 'writeOnceReadOnly')
+
+
+# XXX `none` and `mountable` are deprecated
+class MountTypeEnum(StrEnum):
+    values = ('none', 'mountable', 'mountPoint')
+
+
+class ActiveNotifyEnum(StrEnum):
+    values = ('normal', 'forceEnabled', 'forceDefaultEnabled', 'canDeny')
+    default = 'normal'
+
+
+# noinspection PyPep8Naming
+class Dt_activeNotifyEnum(StrEnum):
+    values = ('normal', 'forceEnabled', 'forceDefaultEnabled', 'canDeny',
+              'willDeny')
+    default = 'normal'
+
+
+class DefaultTypeEnum(StrEnum):
+    values = ('factory', 'object', 'implementation', 'parameter')
+
+
+# XXX 'absolute' is a non-standard extension
+class ScopeEnum(StrEnum):
+    values = ('normal', 'model', 'object', 'absolute')
+    default = 'normal'
+
+
+class ReferenceTypeEnum(StrEnum):
+    values = ('weak', 'strong')
+
+
+class NestedBracketsEnum(StrEnum):
+    values = ('legacy', 'permitted', 'required')
+    default = 'legacy'
+
+
+# XXX the final value should be a pattern matching user-defined type names
+class TargetTypeEnum(StrEnum):
+    values = ('any', 'parameter', 'object', 'single', 'table', 'row')
+    default = 'any'
+
+
+class TargetDataTypeEnum(StrEnum):
+    values = ('any', 'base64', 'boolean', 'dateTime', 'decimal', 'hexBinary',
+              'integer', 'int', 'long', 'string', 'unsignedInt',
+              'unsignedLong', 'dataType')
+    default = 'any'
 
 
 @functools.total_ordering
 class Version:
     """Represents an m.n[.p] version string."""
 
-    def __init__(self, tuple_or_text: Union[Tuple[int, int, int], str], *,
+    def __init__(self, tuple_or_text: Union[tuple[int, int, int], str], *,
                  levels: int = 2):
         assert levels in {2, 3}
         if isinstance(tuple_or_text, tuple):
@@ -195,7 +342,7 @@ class Version:
             self._comps = [int(g) for g in match.groups('0')]
 
     # note that this returns a NEW instance
-    def reset(self, what: Optional[Union[int, Tuple[int, ...]]] = None) -> \
+    def reset(self, what: Optional[Union[int, tuple[int, ...]]] = None) -> \
             'Version':
         comps = self._comps[:]
         indices = (what,) if isinstance(what, int) else what if isinstance(
@@ -203,23 +350,23 @@ class Version:
         assert len(indices) <= 3 and all(0 <= i <= 2 for i in indices)
         for index in indices:
             comps[index] = 0
-        comps = cast(Tuple[int, int, int], tuple(comps))
+        comps = cast(tuple[int, int, int], tuple(comps))
         return Version(tuple(comps))
 
     def __eq__(self, other: 'Version') -> bool:
         if not isinstance(other, Version):
-            raise NotImplementedError
+            return NotImplemented
         return self._comps == other._comps
 
     def __lt__(self, other: 'Version') -> bool:
         if not isinstance(other, Version):
-            raise NotImplementedError
+            return NotImplemented
         return self._comps < other._comps
 
     def __add__(self, other: 'Version') -> 'Version':
         if not isinstance(other, Version):
-            raise NotImplementedError
-        comps = cast(Tuple[int, int, int],
+            return NotImplemented
+        comps = cast(tuple[int, int, int],
                      tuple(sum(t) for t in zip(self._comps, other._comps)))
         return Version(comps)
 
@@ -228,8 +375,8 @@ class Version:
         return self.__str__()
 
     @property
-    def comps(self) -> Tuple[int, int, int]:
-        return cast(Tuple[int, int, int], tuple(self._comps))
+    def comps(self) -> tuple[int, int, int]:
+        return cast(tuple[int, int, int], tuple(self._comps))
 
     def __str__(self):
         last = 3 if self._comps[2] > 0 else 2
@@ -258,6 +405,7 @@ class _SpecOrFileName:
 
     # This is based on the publish.pl parse_file_name function
     def __init__(self, name: str = ''):
+        # noinspection GrazieInspection
         """Parse a name (file or spec) into its constituent parts.
 
         These are all strings:
@@ -292,15 +440,11 @@ class _SpecOrFileName:
         self.a_int = int(self.a) if self.a != '' else 0
         self.c_int = int(self.c) if self.c != '' else 0
 
-    @property
-    def is_valid(self) -> bool:
-        return self.tr != ''
-
     # this ignores 'prefix', 'tr' case, 'label' and 'extension'
     def matches(self, other: '_SpecOrFileName') -> bool:
         # can only compare objects of the same type
         if not isinstance(other, _SpecOrFileName):
-            raise NotImplementedError
+            return NotImplemented
 
         # only versions of the same document can match
         if (self.tr.lower(), self.nnn_int) != \
@@ -313,6 +457,15 @@ class _SpecOrFileName:
         other_c_int = other.c_int if other.c != '' else self.c_int
         return (self.i_int, self.a_int, self.c_int) == \
             (other_i_int, other_a_int, other_c_int)
+
+    @property
+    def is_valid(self) -> bool:
+        return self.tr != ''
+
+    @property
+    def version(self) -> Optional[Version]:
+        return Version((self.i_int, self.a_int, self.c_int)) \
+            if self.i != '' else None
 
     def __str__(self):
         return self.name
@@ -334,11 +487,6 @@ class FileName(_SpecOrFileName):
 
 class Utility:
     """Utility class."""
-
-    # XXX applications can update this
-    # XXX should have a logging-specific module?
-    logger_names = set()
-    """Logger names."""
 
     @staticmethod
     def boolean(value: Union[bool, str, Any]) -> bool:
@@ -406,7 +554,7 @@ class Utility:
         return name.replace(':', '_')
 
     @staticmethod
-    def flatten_tuple(tup: Union[None, Tuple, Any]) -> Optional[Tuple]:
+    def flatten_tuple(tup: Union[None, tuple, Any]) -> Optional[tuple]:
         """Flatten a possibly nested tuple.
 
         Args:
@@ -672,9 +820,9 @@ class Utility:
     # XXX could potentially combine this with nice_list()
     # XXX should use '%s' or similar rather than '\1'?
     @staticmethod
-    def nicer_list(value: List[Any],
+    def nicer_list(value: list[Any],
                    template: Optional[Union[str, Callable[[Any], str]]] = None,
-                   exclude: Optional[List[str]] = None, *,
+                   exclude: Optional[list[str]] = None, *,
                    last: str = 'and') -> str:
         if template is None:
             template = r'\1'
@@ -699,13 +847,18 @@ class Utility:
 
     @staticmethod
     def nice_string(value: Any, *, maxlen: int = 70,
-                    truncateleft: bool = False) -> str:
+                    empty: Optional[str] = None,
+                    truncateleft: bool = False, escape: bool = False) -> str:
         """Return value as a "nice" string.
 
         Args:
             value: The supplied value (it doesn't have to be a string).
             maxlen: Maximum string length to return untruncated.
+            empty: Value to use if the string is empty or consists only of
+            whitespace (default: the original string in single quotes).
             truncateleft: Whether to truncate (if necessary) on the left.
+            escape: Whether to backslash-escape special characters
+            (currently only hyphens).
 
         Returns:
             ``str(value)`` if value isn't a string; otherwise a nicely
@@ -720,16 +873,18 @@ class Utility:
             value_ = re.sub(r'\s+', ' ', value.strip())
             length = len(value_)
             if length == 0:
-                value_ = repr(value)
+                value_ = empty if empty is not None else repr(value)
             elif length > maxlen:
                 if not truncateleft:
                     value_ = value_[:maxlen].strip() + '...'
                 else:
                     value_ = '...' + value_[-maxlen:].strip()
+            if escape:
+                value_ = re.sub(r'-', r'\-', value_)
             return value_
 
     @staticmethod
-    def path_split_drive(path: str) -> Tuple[str, str, str]:
+    def path_split_drive(path: str) -> tuple[str, str, str]:
         """Split a file path into drive, directory and name.
 
         Args:
@@ -780,9 +935,11 @@ class Utility:
             # remove any trailing whitespace from each line
             outval = re.sub(r' *\n', r'\n', outval)
 
+            # replace >= 2 newlines with 2 newlines
+            outval = re.sub(r'\n{2,}', r'\n\n', outval)
+
             # remove any trailing whitespace (necessary to avoid polluting the
-            # prefix length)
-            # XXX I don't understand this comment
+            # common leading whitespace length)
             outval = re.sub(r'\s*$', r'', outval)
 
             # remove common leading whitespace
@@ -796,6 +953,7 @@ class Utility:
         for dirpath, dirnames, filenames in os.walk(dir_, followlinks=True):
             for filename in filenames:
                 path = os.path.join(dirpath, filename)
+                # noinspection PyTypeChecker
                 if pattern is None or re.search(pattern, path):
                     paths += [path]
         return paths
@@ -810,7 +968,7 @@ class Utility:
         return paths
 
     @staticmethod
-    def class_hierarchy(root_or_roots: Union[type, Tuple[type, ...]],
+    def class_hierarchy(root_or_roots: Union[type, tuple[type, ...]],
                         *, title: str = 'Class hierarchy') -> str:
         """Format and return the class hierarchy.
 
