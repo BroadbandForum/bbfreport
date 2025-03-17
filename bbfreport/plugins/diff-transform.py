@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Optional, Union
 
+from ..content import _MacroRefClose
 from ..macro import Macro
 from ..node import DataTypeRef, Description, _HasContent, Model, _ModelItem, \
     Node, Root, _ValueFacet
@@ -319,6 +320,8 @@ def visit(root: Root, args, logger) -> Optional[bool]:
 
                     # try to convert 'Removed OLD TYP' and 'Added NEW TYP' to
                     # 'Changed TYP = OLD -> NEW'
+                    # XXX it would be nice if this could handle promotion of
+                    #     diagnostic OBJ. to OBJ() command ... but it can't
                     new_arg = 'Added %s%s%s' % (context, ref, typ)
                     if macro_args and (old_arg := macro_args[-1]):
                         old_words, new_words = old_arg.split(), new_arg.split()
@@ -336,10 +339,10 @@ def visit(root: Root, args, logger) -> Optional[bool]:
                     # logger.debug('%s %s (and down and up) unhidden' % (
                     #     elem.nicepath, elem.typename))
                 elif operation == Operation.removed:
-                    ref = elem_flt(context, elem_ref(elem), term=' ')
-                    typ = elem_flt(context, elem_typ(elem))
                     # we won't try to reference it; it's no longer there!
-                    macro_args.append('Removed %s%s %s' % (context, ref, typ))
+                    val = elem_flt(context, emph_nod(elem), term=' ')
+                    typ = elem_flt(context, elem_typ(elem))
+                    macro_args.append('Removed %s%s %s' % (context, val, typ))
 
             elif entity == Entity.content:
                 assert operation == Operation.changed, \
@@ -347,15 +350,25 @@ def visit(root: Root, args, logger) -> Optional[bool]:
                 old_body = old_node.content.get_body_as_list(collapse=True)
                 new_body = new_node.content.get_body_as_list(collapse=True)
 
+                # XXX should use better variable names
                 tag = name
                 i1, i2, _ = value
                 j1, j2, _ = value2
 
-                # XXX explain this and use better variable names
+                # if the first in new_body is a close(), move it to body; this
+                # avoids problems when inserting (e.g.) '}} {{enum|X'
+                # XXX this isn't a proper fix; the diffs need to be more
+                #     macro-aware
+                if j2 > j1 and isinstance(new_body[j1], _MacroRefClose):
+                    j1 += 1
+
+                # add items since the last run to body
                 if j1 > j:
                     body.extend(new_body[j:j1])
 
-                # escape special characters in 'old'
+                # convert 'old' to a string and escape special characters,
+                # because it might reference deprecated, obsoleted or
+                # deleted items
                 old = ''.join(Macro.escape(str(s)) for s in old_body[i1:i2])
                 new = ''.join(str(s) for s in new_body[j1:j2])
                 if tag == 'replace':
@@ -414,7 +427,7 @@ ignored_attrnames = {'action', 'activeNotify', 'dmr_previousParameter',
                      'dmr_previousObject', 'dmr_previousCommand',
                      'dmr_previousEvent', 'dmr_previousProfile', 'dmr_version',
                      'functional', 'targetParent', 'version'}
-ignored_typenames = {'componentRef', 'profile'}
+ignored_typenames = {'cdata', 'componentRef', 'profile'}
 
 
 # XXX this should be a _Node method and should use comparison operators, where
@@ -477,10 +490,9 @@ def node_diffs(old_node: Node, new_node: Node, *,
         # if there are no matches, it's been removed (this should be
         # highlighted by the format)
         if not elem2s:
-            # XXX this might not be the best criterion
-            func = logger.error if isinstance(elem1, _ModelItem) else \
-                logger.info
-            func('%s: removed %s %s' % (
+            # report at the info level because it's not a key aspect of this
+            # transform, and because the difflint transform will report it
+            logger.info('%s: removed %s %s' % (
                 old_node.nicepath, elem1.typename, elem1.keylast or elem1))
             Diff.append(diffs, old_node, new_node, Entity.elem,
                         Operation.removed, elem=elem1)
@@ -544,7 +556,8 @@ def node_diffs(old_node: Node, new_node: Node, *,
                 # XXX should generalize this to check for any 'close then
                 #     open' within a chunk, because this is harder to handle
                 para_sep = '[close(div), open(div), call(classes), argsep(|)]'
-                space_set = {"[' ']", "'\n\n'" '[call(nl)]', '[call(np)]'}
+                space_set = {r"[' ']", r"['\n\n']", r"[' ', '\n\n']",
+                             r"[call(nl)]", r"[call(np)]"}
                 if str(chunk1) in space_set and str(chunk2) == para_sep:
                     is_whitespace = True
 

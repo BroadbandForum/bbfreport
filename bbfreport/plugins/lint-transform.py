@@ -273,7 +273,7 @@ def visit__base(node: _Base, warning, info):
 #     macro-references to; maybe elements should be more like attributes, and
 #     should be instantiated on reference? or just require a description
 #     element (and sometimes allow it to be empty)
-def visit__has_description(node: _HasDescription, warning):
+def visit__has_description(node: _HasDescription, error, warning, info, debug):
     ####################
     # description checks
 
@@ -312,7 +312,8 @@ def visit__has_description(node: _HasDescription, warning):
     #     warnings should be output by macro expansion
     transitions = {}
     for status in StatusEnum.values:
-        if status in content.macro_refs:
+        if status in content.get_macro_refs(error=error, warning=warning,
+                                            info=info, debug=debug):
             macro_refs = content.macro_refs[status]
             if (num_macro_refs := len(macro_refs)) > 1:
                 warning('has %d {{%s}} macro references' % (
@@ -426,8 +427,11 @@ def visit_data_type(data_type: DataType, error, warning):
     if (units := data_type.units_inherited) and not data_type.baseNode:
         # the description is on the containing parameter, or the data type
         owner = data_type.parameter_in_path or cast(DataType, data_type)
-        if not owner.dmr_noUnitsTemplate and \
-                ('units', 0) not in owner.description.content.macro_refs:
+        macro_refs = owner.description.content.macro_refs
+        # the {{range}} expansion includes {{units}} so there's no need to
+        # require {{units}} as well
+        if not owner.dmr_noUnitsTemplate and 'range' not in macro_refs and \
+                'units' not in macro_refs:
             warning('units %s but no {{units}} macro' % units.value)
 
 

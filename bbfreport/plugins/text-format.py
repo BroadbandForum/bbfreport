@@ -112,20 +112,20 @@ class TextFormat(Format):
     def report_root(self, root: Root, *, level: int = 0) -> None:
         datatypes = cast(list[DataType], DataType.findall())
         root.args.output.write(
-                '%sdatatypes (%d)\n' % (self.indent(level), len(datatypes)))
+            '%sdatatypes (%d)\n' % (self.indent(level), len(datatypes)))
         for datatype in sorted(datatypes, key=lambda d: str(d).lower()):
             self.report_datatype(datatype, level=level + 1)
 
         references = cast(list[Reference], Reference.findall())
         root.args.output.write(
-                '%sreferences (%d)\n' % (self.indent(level), len(references)))
+            '%sreferences (%d)\n' % (self.indent(level), len(references)))
         if root.args.text_list_references:
             for reference in sorted(references, key=lambda r: str(r).lower()):
                 self.report_reference(reference, level=level + 1)
 
         components = cast(list[Component], Component.findall())
         root.args.output.write(
-                '%scomponents (%d)\n' % (self.indent(level), len(components)))
+            '%scomponents (%d)\n' % (self.indent(level), len(components)))
         for component in sorted(components, key=lambda c: str(c).lower()):
             self.report_component(component, level=level + 1)
 
@@ -133,26 +133,23 @@ class TextFormat(Format):
         # command line
         models = cast(list[Model], Model.findall())
         root.args.output.write(
-                '%smodels (%d)\n' % (self.indent(level), len(models)))
+            '%smodels (%d)\n' % (self.indent(level), len(models)))
         for model in models:
             self.report_model(model, level=level + 1)
 
     def report_datatype(self, datatype: DataType, *, level: int = 0) -> None:
         datatype.args.output.write(
-                '%s%s from %s\n' % (
-                    self.indent(level), datatype, datatype.parent))
+            '%s%s from %s\n' % (self.indent(level), datatype, datatype.parent))
 
     def report_reference(self, reference: Reference, *,
                          level: int = 0) -> None:
         reference.args.output.write(
-                '%s%s = %s\n' % (
-                    self.indent(level), reference.id, reference.name))
+            '%s%s = %s\n' % (self.indent(level), reference.id, reference.name))
 
     def report_component(self, component: Component, *,
                          level: int = 0) -> None:
-        component.args.output.write(
-                '%s%s from %s\n' % (self.indent(level), component.name,
-                                    component.parent))
+        component.args.output.write('%s%s from %s\n' % (
+        self.indent(level), component.name, component.parent))
 
     def report_model(self, model: Model, *, level: int = 0) -> None:
         base = f' : {model.base}' if model.base else ''
@@ -202,7 +199,7 @@ class TextFormat(Format):
 
     def report_object(self, object_: Object, *, level: int = 0) -> bool:
         object_.args.output.write(
-                '%sobject %s\n' % (self.indent(level), object_.name))
+            '%sobject %s\n' % (self.indent(level), object_.name))
         return False
 
     def report_parameter(self, parameter: Parameter, *,
@@ -226,8 +223,8 @@ class TextFormat(Format):
                           level: int = 0) -> bool:
         attrs = ' ' + nice_dict(ref.attrs, style='csv') if ref.attrs else ''
         extra = ''  # XXX f' key {ref.key}'
-        ref.args.output.write('%s%s%s%s\n' % (
-            self.indent(level), ref.typename, attrs, extra))
+        ref.args.output.write(
+            '%s%s%s%s\n' % (self.indent(level), ref.typename, attrs, extra))
         return False
 
     def report_strvalue(self, elem: _Base, *, level=0) -> bool:
@@ -265,7 +262,7 @@ class TextFormat(Format):
     def report_unhandled(self, elem: _Base, *, level: int = 0) -> bool:
         nicepath = ' %s' % elem.nicepath if elem.nicepath else ''
         elem.args.output.write(
-                '%s%s%s [x]\n' % (self.indent(level), elem.typename, nicepath))
+            '%s%s%s [x]\n' % (self.indent(level), elem.typename, nicepath))
         return False
 
     @staticmethod

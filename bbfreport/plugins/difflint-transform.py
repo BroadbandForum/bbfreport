@@ -1,6 +1,6 @@
 """Diffs lint transform plugin."""
 
-# Copyright (c) 2023, Broadband Forum
+# Copyright (c) 2023-2024, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -47,12 +47,18 @@
 
 from typing import Optional
 
-from bbfreport.node import _Base, Model, _ModelItem, _ProfileItem, \
-    _ValueFacet, Version
+from bbfreport.node import _Base, Command, CommandRef, Key, Model, \
+    _ModelItem, _Object, _Parameter, ParameterRef, ObjectRef, Profile, \
+    _ProfileItem, _ValueFacet, Version
 
-FIRST_USP_VERSION = Version((2, 12, 0))
-FIRST_COMPONENT_CLAMP_VERSION = Version((2, 16, 0))
-
+# the first data model versions that supported USP
+FIRST_USP_VERSIONS = {
+    'Device:2': Version((2, 12, 0)),
+    'FAPService:2': Version((2, 1, 1)),
+    'StorageService:1': Version((1, 3, 1)),
+    'STBService:1': Version((1, 4, 1)),
+    'VoiceService:2': Version((2, 0, 1))
+}
 
 # need two files on the command line
 # XXX what if there are two models in a single file?
@@ -83,12 +89,36 @@ def save_node(node: _Base, *,
     models[key[0]][key[1:]] = node
 
 
+# profiles are expanded to include internal profile contents
+def save_profile(prof: Profile) -> None:
+    # if profile item's key[2] (the profile name) starts with an underscore,
+    # return a modified key without the underscore
+    # XXX this assumes too much knowledge about key structure
+    # XXX it also assumes that the public profile has the same name sans
+    #     the underscore
+    def fix_key(nod: _Base) -> Key:
+        ky = nod.key
+        if not ky or len(ky) < 3 or not ky[2].startswith('_'):
+            return None
+        else:
+            return ky[0:2] + (ky[2][1:],) + ky[3:]
+
+    # XXX this will also be done by visit__model_item()
+    save_node(prof)
+
+    for node in prof.profile_expand(base=True, extends=True):
+        if isinstance(node, _ProfileItem):
+            save_node(node, key=fix_key(node))
+
+
 def visit__model_item(item: _ModelItem):
-    save_node(item)
+    if not item.name.startswith('_'):
+        save_node(item)
 
 
-def visit__profile_item(item: _ProfileItem):
-    save_node(item)
+def visit_profile(prof: Profile):
+    if not prof.name.startswith('_'):
+        save_profile(prof)
 
 
 def visit__value_facet(value: _ValueFacet):
@@ -99,32 +129,52 @@ def visit__value_facet(value: _ValueFacet):
 
 
 def _end_(_, logger):
+    def clamp(nod: _Base, ver: Optional[Version]) -> Optional[Version]:
+        if (model := nod.model_in_path) and model.usp and ver is not None:
+            first_usp_version = FIRST_USP_VERSIONS.get(model.keylast, None)
+            if first_usp_version is not None and ver < first_usp_version:
+                ver = first_usp_version
+        return ver
+
     # permit dmr:version
     def version(nod: _Base) -> Optional[Version]:
-        return nod.version or nod.dmr_version
+        return clamp(nod, nod.version or nod.dmr_version)
 
-    # note use of h_version_inherited; also, for USP Device:2, clamp the
-    # version to 2.12 (this is necessary for pre-2.16 models that don't
-    # clamp the version via component references)
-    # XXX it might no longer be necessary because, from 2.18, component
-    #     references default the clamp version to the current version
+    # note use of h_version_inherited
     def version_inherited(nod: _Base) -> Version:
         inherited = nod.h_version_inherited
         assert inherited is not None, '%s: no inherited version' % nod.nicepath
-        if (model := nod.model_in_path) and model.usp and \
-                model.keylast == 'Device:2' and \
-                model.model_version < FIRST_COMPONENT_CLAMP_VERSION and \
-                inherited < FIRST_USP_VERSION:
-            inherited = FIRST_USP_VERSION
-        return inherited
+        return clamp(nod, inherited)
 
     # this returns the parent first; is this the best order? I think so
     # XXX this could be a standard method / property?
     def ancestors(nod: _Base) -> list[_Base]:
         return ([nod.parent] + ancestors(nod.parent)) if nod.parent else []
 
+    # this determines whether a parameter or object should be ignored because
+    # it's been replaced with a command
+    def ignore_item(nod: _Base) -> bool:
+        # helper for returning objpath without the profile name, which would
+        # normally be included for profile items, and without a trailing dot
+        def objpath(n: _Base) -> str:
+            return n.fullpath(style='object+notprofile').rstrip('.')
+
+        if isinstance(nod, (_Parameter, ParameterRef, _Object, ObjectRef)):
+            # this will be an invalid path for multi-instance objects, but it
+            # doesn't really matter (just slightly inefficient)
+            cmd_objpath = objpath(nod) + '()'
+            for cmd in nod.findall(Command) + nod.findall(CommandRef):
+                if cmd.objpath == cmd_objpath:
+                    logger.info('%s: ignored %s -> %s %s change' % (
+                        nod.nicepath, nod.typename, cmd.typename, cmd_objpath))
+                    return True
+        return False
+
     # two models should have been collected
-    assert len(models) == 2, '%d model supplied (need 2)' % len(models)
+    if len(models) != 2:
+        logger.error('need 2 models to compare, but found only %d' %
+                     len(models))
+        return
     old, new = models.values()
 
     # determine the old and new model versions (actually old and new should
@@ -133,10 +183,9 @@ def _end_(_, logger):
                       isinstance(node, Model))
     new_version = max(node.model_version for node in new.values() if
                       isinstance(node, Model))
-
-    # XXX the logic's not quite right; corrigenda muck things up, so set the
-    #     corrigendum number to 0
-    new_version = Version((new_version.comps[0], new_version.comps[1], 0))
+    assert old_version <= new_version, "first model (%s) is newer than " \
+                                       "second model (%s)" % (
+                                           old_version, new_version)
 
     # get keys that are present in both versions
     common_keys = set(old.keys()) & set(new.keys())
@@ -167,10 +216,20 @@ def _end_(_, logger):
     # get nodes that have been removed in the new model
     removed_keys = set(old.keys()) - set(new.keys())
     removed = {key: old[key] for key in removed_keys}
-    removed_sorted = {key: node for key, node in sorted(
-            removed.items(), key=lambda item: item[0])}
+
+    # if a node was removed, there's no point complaining about its children
+    removed_pruned = {key: node for key, node in removed.items() if not any(
+            ancestor in removed.values() for ancestor in ancestors(node))}
+
+    # special case: if a parameter or object was removed, but a corresponding
+    # command was added, this was a transition to separate USP and CWMP data
+    # models, so don't complain
+    removed_pruned = {key: node for key, node in removed_pruned.items()
+                      if not ignore_item(node)}
 
     # report 'removed' errors
+    removed_sorted = {key: node for key, node in sorted(
+            removed_pruned.items(), key=lambda item: item[0])}
     for key, node in removed_sorted.items():
         context_node = node.instance_in_path((_ModelItem, _ProfileItem))
         node_value = ' %s' % node.value if isinstance(node,
@@ -179,16 +238,16 @@ def _end_(_, logger):
                        'deprecated' % (
                            context_node.nicepath, node.elemname, node_value))
 
-    # determine missing and invalid versions (this can give spurious results
-    # if comparing non-adjacent versions)
+    # determine missing and invalid versions (we need both the old_version
+    # and new_version checks because old_version can be equal to new_version)
     missing_errors = {key: node for key, node in added_sorted.items() if
-                      not isinstance(node, _ProfileItem) and
-                      version(node) is None and version_inherited(
-                              node) < new_version}
+                      version(node) is None and
+                      version_inherited(node) <= old_version and
+                      version_inherited(node) < new_version}
     invalid_errors = {key: node for key, node in added_sorted.items() if
-                      not isinstance(node, _ProfileItem) and
-                      version(node) is not None and version(
-                              node) < new_version}
+                      version(node) is not None and
+                      version(node) <= old_version and
+                      version(node) < new_version}
 
     # if a node has an error, there's no point complaining about its children
     # (we ignore increased_errors here; they're not reported as warnings)
@@ -198,9 +257,7 @@ def _end_(_, logger):
                       not any(ancestor in nodes_with_errors for ancestor in
                               ancestors(node))}
 
-    # report 'decreased' and 'increased' errors (we always report cases where
-    # the version decreased, e.g., to catch missing clamp versions, but not
-    # where it increased, which is assumed to be to fix a previous error)
+    # report 'decreased' and 'increased' errors
     for key, node in decreased_errors.items():
         logger.warning('%s: version decreased from %s (in %s) to %s '
                        '(in %s)' % (
@@ -208,11 +265,11 @@ def _end_(_, logger):
                            old_version, version_inherited(node[NEW]),
                            new_version))
     for key, node in increased_errors.items():
-        logger.info('%s: version increased from %s (in %s) to %s '
-                    '(in %s)' % (
-                        node[NEW].nicepath, version_inherited(node[OLD]),
-                        old_version, version_inherited(node[NEW]),
-                        new_version))
+        logger.warning('%s: version increased from %s (in %s) to %s '
+                       '(in %s)' % (
+                           node[NEW].nicepath, version_inherited(node[OLD]),
+                           old_version, version_inherited(node[NEW]),
+                           new_version))
 
     # report 'missing' errors
     for key, node in missing_errors.items():
@@ -227,6 +284,7 @@ def _end_(_, logger):
     # report invalid profile items (items added to existing profiles)
     profile_errors = {key: node for key, node in added_sorted.items() if
                       isinstance(node, _ProfileItem) and
+                      version_inherited(node) <= old_version and
                       version_inherited(node) < new_version}
     for key, node in profile_errors.items():
         logger.warning(
@@ -237,9 +295,33 @@ def _end_(_, logger):
     profile_keys = {key for key in common_keys if
                     isinstance(new[key], _ProfileItem) and new[
                         key].requirement != old[key].requirement}
-    for key in sorted(profile_keys):
+
+    # special case: reducing the requirement from 'readWrite' to
+    # 'writeOnceReadOnly' is OK and so shouldn't be reported
+    profile_keys_pruned = {key for key in profile_keys if not (
+            old[key].requirement == 'readWrite' and
+            new[key].requirement == 'writeOnceReadOnly')}
+
+    # special case: reducing the requirement to 'present' (e.g. from
+    # 'createDelete') is fixing a problem and so shouldn't be reported
+    profile_keys_pruned = {key for key in profile_keys_pruned if not (
+            new[key].requirement == 'present' and
+            new[key].requirement < old[key].requirement)}
+
+    # special case: don't report where the only change is leading or trailing
+    # whitespace
+    profile_keys_pruned = {key for key in profile_keys_pruned if not (
+            new[key].requirement.value.strip() ==
+            old[key].requirement.value.strip())}
+
+    for key in sorted(profile_keys_pruned):
         old_node, new_node = old[key], new[key]
         logger.warning("%s: can't change profile requirement from %s (defined "
                        "in %s) to %s" % (
                            new_node.nicepath, old_node.requirement,
                            version_inherited(old_node), new_node.requirement))
+
+    # hide the first (old) model (this means that the hidefirst transform
+    # is no longer needed)
+    for node in old.values():
+        node.hide()

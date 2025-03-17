@@ -283,12 +283,12 @@ class XMLFormat(Format):
                                     'indentation; usually only do this when '
                                     'generating \'full\' XML')
         arg_group.add_argument('--xml-indent-step', type=int,
-                               default=default_indent_step,
+                               default=default_indent_step, metavar='STEP',
                                help='indentation per level when '
                                     'auto-indenting; default: %r' %
                                     default_indent_step)
         arg_group.add_argument('--xml-line-length', type=int,
-                               default=default_line_length,
+                               default=default_line_length, metavar='LENGTH',
                                help='maximum line length; default: %r' %
                                     default_line_length)
         arg_group.add_argument('--xml-no-wrap', action='store_true',
@@ -312,7 +312,8 @@ class XMLFormat(Format):
 
     # check that only one file was supplied on the command-line
     def post_init(self, args) -> bool:
-        if len(args.file) > 1:
+        # XXX disabled, because this doesn't work with diffs, dt, mount etc.
+        if False and len(args.file) > 1:
             logger.error("can't generate XML when multiple files are "
                          "specified on the command-line")
             return True
@@ -344,7 +345,8 @@ class XMLFormat(Format):
             node.xml_done = True
 
     def __check_root(self, root) -> None:
-        assert len(root.xml_files) == 1
+        # XXX disabled, because this doesn't work with diffs, dt etc.
+        # assert len(root.xml_files) == 1
         dm_document = root.xml_files[0].dm_document
 
         # if SplitTransform has just split paragraphs, update the dmr
@@ -462,7 +464,7 @@ class XMLFormat(Format):
                     output.write('\n')
 
                 # add a blank line for the specified type names
-                if typename in self._newline_typenames:
+                if typename.replace('dt_', '') in self._newline_typenames:
                     output.write('\n')
 
             # start the element and add the attributes

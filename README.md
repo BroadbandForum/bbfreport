@@ -7,32 +7,32 @@ v2 label is just to distinguish it from the earlier [report.pl] tool. APIs
 are still liable to minor change, and will probably continue to do so
 until v3.
 
-The [BBF] Report Tool processes one or more [Data Model (DM) XML files][DM].
-Having read the files, it always performs various "lint" checks, and then it
-optionally generates an output format, e.g., "full" XML (a single file in
-which all imports have been resolved) or markdown (which can be converted to
-HTML by [pandoc]).
+The [BBF] Report Tool processes one or more [Data Model (DM)][DM] or
+[Device Type (DT)][DT] XML files. Having parsed the files, it always
+performs various "lint" checks, and then it optionally generates an
+output format, e.g., HTML or "full" XML (a single file in which all
+imports have been resolved).
 
-The tool requires at least [python] 3.9, and can be installed from [PyPI].
+The tool requires at least [python] 3.11, and can be installed from [PyPI].
 It replaces an earlier [report.pl] tool.
 
 [BBF]: https://www.broadband-forum.org
 [DM]: https://data-model-template.broadband-forum.org/#sec:executive-summary
-[pandoc]: https://pandoc.org
+[DT]: https://data-model-template.broadband-forum.org/#sec:executive-summary
 [PyPI]: https://pypi.org/search/?q=bbfreport
 [python]: https://www.python.org
 [report.pl]: https://github.com/BroadbandForum/cwmp-xml-tools
 
 ## Quick start
 
-Ensure you have at least python 3.9, and install the tool from PyPI.
+Ensure you have at least python 3.11, and install the tool from PyPI.
 
-    % python -m pip install bbfreport
+    % python3 -m pip install bbfreport
 
 The `report.py` command should now work.
 
     % report.py -v
-    Broadband Forum bbfreport v2.0.1 (2023-06-27 version)
+    Broadband Forum bbfreport v2.3.0 (2025-03-14 version)
 
 You'll probably want to download some data models.
 
@@ -43,27 +43,20 @@ You'll probably want to download some data models.
 
 Now you can run the tool, e.g., here we're running it on the USP version of
 the latest [TR-181 (Device:2)][Device:2] model.
-* `-I` (`--include`) indicates where to look for DM XML files
+* `-I` (`--include`) indicates where to look for XML files
 * `-l` (`--loglevel`) is here used to suppress warnings (there are some
   warnings, because the tool has improved since the data model was published)
 <!-- -->
 
     % report.py -I usp-data-models -l error tr-181-2-usp.xml
 
-To generate output, give an output format.
-* `-f` (`--format`) indicates the output format
-* `-o` (`--output`) specifies the output file
+To generate output, specify the output format and/or the output file name:
+* `-f` (`--format`) specifies the output format (usually unnecessary, because
+  it's derived from the output file name)
+* `-o` (`--output`) specifies the output file name
 <!-- -->
 
-    % report.py -I usp-data-models -l error tr-181-2-usp.xml -f xml -o tr-181-2-usp-full.xml
-
-> **Note**: Direct HTML generation isn't yet supported. It's currently
-necessary to generate markdown and then run it through [pandoc] to
-generate the HTML.
-
-Unfortunately, `report.py -h` (`--help`) doesn't yet list all the available
-formats (new-style formats aren't listed), e.g., it doesn't list the
-`markdown` format.
+    % report.py -I usp-data-models -l error tr-181-2-usp.xml -o tr-181-2-usp-full.xml
 
 ## How it works
 
@@ -124,7 +117,7 @@ accessed via an `import` statement such as this one:
 If the `import` statement has a `spec` attribute then a file with a
 matching `spec` will be searched for. Here the spec specifies `i` and `a`,
 so they must match exactly, but it omits `c`, so the latest `c` will be
-returned.
+used.
 
 ## Transforms and Formats
 
@@ -170,15 +163,14 @@ There are several things to note here:
 
 You can then run the tool like this:
 
-    % report.py -I usp-data-models tr-181-2-usp.xml -P . -t lower -l 1 -L lower
+    % report.py -I usp-data-models tr-181-2-usp.xml -t lower -l 1 -L lower
 
 The options (some of which are new) are as follows:
 * `-I` (`--include`) indicates where to look for DM XML files
-* `-P` (`--plugindir`) indicates where to search for transforms and formats
 * `-t` (`--transform`) says which transform to run (there could be several)
 * `-l` (`--loglevel`) is the log level; `1` is the same as `info`
-* `-L` (`--loggername`) is the logger name; only the top-level `report`
-  logger is initially enabled
+* `-L` (`--loggername`) is the logger name; the top-level `report` logger
+  is always enabled
 <!-- -->
 
 Here's the output:
@@ -235,57 +227,6 @@ logger name is `lint. Here's an example.
     INFO:report:performed  'lint' transform in 115 ms
     INFO:report:generating 'null' format
     INFO:report:generated  'null' format in 0 ms
-
-## Running pandoc
-
-The report tool doesn't yet generate HTML directly. To generate HTML, use the
-`markdown` format to generate markdown, and then run [pandoc] to generate HTML.
-
-The `markdown` format generates an extended version of [commonmark]
-(referred to as commonmark_x). To process it, you need to install the
-following:
-
-* pandoc 3.0 or later: This might already be installed, or you might
-be able to install it using the OS package manager. If not, you can get it
-from <https://github.com/jgm/pandoc/releases>
-
-* list-table filter: Get this from
-<https://github.com/pandoc-ext/list-table>
-
-* logging library: Get this from
-<https://github.com/pandoc-ext/logging>
-
-* custom HTML writer: Get this from
-<https://github.com/BroadbandForum/pandoc-html-writer>
-
-Assuming that you've already installed pandoc, and that you want to process
-`model.md`, you can do this:
-
-% git clone https://github.com/pandoc-ext/list-table
-Cloning into 'list-table'...
-...
-% ln -s list-table/list-table.lua
-
-% git clone https://github.com/pandoc-ext/logging
-Cloning into 'logging'...
-...
-% ln -s logging/logging.lua
-
-% git clone https://github.com/BroadbandForum/pandoc-html-writer
-Cloning into 'pandoc-html-writer'...
-...
-% ln -s pandoc-html-writer/html-writer.lua
-% ln -s pandoc-html-writer/html-derived-writer.lua
-
-% report.py model.xml --format markdown --output model.md
-
-% pandoc model.md --standalone --from commonmark_x --lua-filter list-table.lua --to html-derived-writer.lua --output model.html
-
-Refer to the pandoc documentation for more information, e.g., on how to
-avoid the need for the soft links.
-
-[commonmark]: https://commonmark.org
-[pandoc]: https://pandoc.org
 
 ## Notes
 

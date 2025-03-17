@@ -40,6 +40,8 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
+# pyright: reportUnusedImport=false
+
 from .content import Content
 from .exception import BBFReportException
 from .format import Format
@@ -63,6 +65,7 @@ from .version import __version__, __version_date__
 # use this when reporting the version
 def version(*, as_markdown: bool = False) -> str:
     # derive the PyPI package name and URL
+    assert __package__ is not None
     pypi_package = __package__.split('.')[0]
     pypi_url = 'https://pypi.org/project/%s' % pypi_package
 

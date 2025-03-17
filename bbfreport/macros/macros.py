@@ -8,7 +8,7 @@ Note::
       ``''text''`` etc. (should convert mediawiki-style markup?)
 """
 
-# Copyright (c) 2022-2023, Broadband Forum
+# Copyright (c) 2022-2025, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -56,8 +56,8 @@ from ..content import CLOSE_DIV, Content, OPEN_DIV
 from ..exception import MacroException
 from ..macro import Macro, MacroRef
 from ..node import AbbreviationsItem, DataType, DataTypeAccessor, \
-    EnumerationRef, GlossaryItem, _HasContent, InstanceRef, Object, \
-    Parameter, PATH_QUIET, PathRef, Profile, Reference, Syntax, \
+    EnumerationRef, GlossaryItem, _HasContent, InstanceRef, _Number, Object, \
+    Parameter, PATH_QUIET, PathRef, Profile, Range, Reference, Syntax, \
     Template, typename, _ValueFacet
 from ..path import follow_reference
 from ..property import Null
@@ -108,7 +108,8 @@ def cast_node(node_type_or_types: Union[NodeType, tuple[NodeType, ...]],
         if isinstance(node_type_or_types, tuple) else (node_type_or_types,)
     if not isinstance(node, node_types):
         sep = ' ' if prefix else ''
-        typenames = Utility.nicer_list([typename(nt) for nt in node_types])
+        typenames = Utility.nicer_list([typename(nt).lstrip('_') for nt in
+                                        node_types])
         raise MacroException('%s%sonly valid in %s (not in %s) descriptions'
                              % (prefix, sep, typenames, node.typename))
     return node
@@ -137,6 +138,25 @@ def get_markdown(content: Content, *, node, force: bool = False,
         markdown = content.markdown or ''
         if force or not markdown:
             markdown = Macro.expand(content, node=node, **kwargs)
+
+    return markdown
+
+
+def get_markdown_and_tidy(content: Content, **kwargs) -> str:
+    markdown = get_markdown(content, **kwargs)
+
+    # suppress tidy-up if the markdown ends with '\n:::' (a fenced div)
+    # XXX also need the leading '\n\n'
+    # XXX this is a hack; need a cleaner solution
+    if markdown.endswith('\n:::'):
+        markdown = '{{np}}' + markdown + '{{np}}'
+    else:
+        # replace newlines with single spaces
+        markdown = re.sub(r'\n+', ' ', markdown)
+
+        # remove trailing period (if present)
+        markdown = re.sub(r'\.$', '', markdown)
+
     return markdown
 
 
@@ -360,20 +380,9 @@ def expand_values(values: dict[str, _ValueFacet], *, owner, stack, warning,
         text += '* [%s%s%s]{#%s}' % (style, key, style, value.anchor)
 
         # process the description
-        markdown = get_markdown(content, node=description, stack=stack,
-                                warning=my_warning, **kwargs)
-
-        # suppress tidy-up if the markdown ends with '\n:::' (a fenced div)
-        # XXX also need the leading '\n\n'
-        # XXX this is a hack; need a cleaner solution
-        if markdown.endswith('\n:::'):
-            markdown = '{{np}}' + markdown + '{{np}}'
-        else:
-            # replace newlines with single spaces
-            markdown = re.sub(r'\n+', ' ', markdown)
-
-            # remove trailing period (if present)
-            markdown = re.sub(r'\.$', '', markdown)
+        markdown = get_markdown_and_tidy(
+                content, node=description, stack=stack,warning=my_warning,
+                **kwargs)
 
         # items will be concatenated with comma separators
         items = [markdown] if markdown else []
@@ -410,9 +419,13 @@ def expand_values(values: dict[str, _ValueFacet], *, owner, stack, warning,
 # the remainder are defined in alphabetical order for ease of reference
 
 # noinspection PyShadowingBuiltins
-def expand_abbref(id, **_kwargs) -> str:
-    item = find_node(AbbreviationsItem, id)
-    return '[%s](#%s)' % (item.id, item.anchor)
+def expand_abbref(id, *, node, **_kwargs) -> str:
+    item = find_node(AbbreviationsItem, id) if id \
+        else cast_node(AbbreviationsItem, node.parent)
+    text = '*%s*' % item.id
+    if item is not node.parent:
+        text = '[%s](#%s)' % (text, item.anchor)
+    return text
 
 
 def expand_access(node, **_kwargs) -> str:
@@ -481,7 +494,7 @@ def expand_diffs(node, diffs, **_kwargs) -> Content:
     chunks = []
     chunks.append(OPEN_DIV)
     chunks.append('{{div|diffs|')
-    chunks.append('**Changes in %s:**' % version if version else
+    chunks.append('**Changes since %s:**' % version if version else
                   '**Changes:**')
     for i, diff in enumerate(diffs):
         chunks.append('{{np}}' if i == 0 else '{{nl}}')
@@ -491,16 +504,25 @@ def expand_diffs(node, diffs, **_kwargs) -> Content:
     return Content(''.join(chunks))
 
 
-def expand_div(classes: str, text: str, **_kwargs) -> Union[str, Content]:
+def expand_div(classes: str, text: str, stack: list[MacroRef],
+               **_kwargs) -> Union[str, Content]:
     if not text:
         return ''
     elif not classes:
         return Content('{{np}}%s' % text)
     else:
+        # XXX derive the number of colons from the div nesting depth to work
+        #     around a markdown-it bug that requires outer divs to use more
+        #     colons than nested than inner divs; also use nine colons for
+        #     removed/inserted text: see removed_or_inserted()
+        div_depth = len([entry for entry in stack if entry.name == 'div'])
+        assert div_depth > 0
+        colons = ':' * (9 - div_depth)
         class_lst = classes.split()
         class_str = class_lst[0] if len(class_lst) == 1 else \
             '{%s}' % ' '.join('.%s' % cls for cls in class_lst)
-        return Content('{{np}}::: %s\n%s\n:::' % (class_str, text))
+        return Content('{{np}}%s %s\n%s\n%s' % (
+            colons, class_str, text, colons))
 
 
 def expand_empty(style: str, chunks, **_kwargs) -> str:
@@ -572,9 +594,13 @@ def expand_factory(*, node, **_kwargs) -> Content:
 
 
 # noinspection PyShadowingBuiltins
-def expand_gloref(id, **_kwargs) -> str:
-    item = find_node(GlossaryItem, id)
-    return '[%s](#%s)' % (item.id, item.anchor)
+def expand_gloref(id, *, node, **_kwargs) -> str:
+    item = find_node(GlossaryItem, id) if id \
+        else cast_node(GlossaryItem, node.parent)
+    text = '*%s*' % item.id
+    if item is not node.parent:
+        text = '[%s](#%s)' % (text, item.anchor)
+    return text
 
 
 def expand_hidden(value, **_kwargs) -> Content:
@@ -634,7 +660,7 @@ def expand_keys(node, warning, debug, **_kwargs) -> Content:
     immutable_non_functional_keys = usp
 
     # access and enable_parameter come from the object with the unique keys
-    access = obj.access
+    obj_access = obj.access
     enable_parameter = None if ignore_enable_parameter else \
         obj.enableParameter
 
@@ -681,9 +707,10 @@ def expand_keys(node, warning, debug, **_kwargs) -> Content:
     # if requested, output parameter-specific info.name
     if parameter is not None:
         param_name = parameter.name
+        param_access = parameter.access
         need_blank_line = False
-        if access != 'readOnly' and param_name in non_defaulted:
-            if not values_supplied_on_create:
+        if obj_access != 'readOnly' and param_name in non_defaulted:
+            if not values_supplied_on_create or param_access == 'readOnly':
                 text += "The "
             else:
                 text += "If the value isn't assigned by the Controller on " \
@@ -699,9 +726,11 @@ def expand_keys(node, warning, debug, **_kwargs) -> Content:
         if immutable_non_functional_keys and param_name in non_functional:
             if need_blank_line:
                 text += '{{np}}'
-            text += "This is a non-functional key and its value " \
-                    "MUST NOT change once it's been assigned by the " \
-                    "Controller or set internally by the Agent."
+            assigned = ' assigned by the Controller or' if \
+                param_access != 'readOnly' else ''
+            text += f"This is a non-functional key and its value " \
+                    f"MUST NOT change once it's been{assigned} set " \
+                    f"internally by the Agent."
 
         return Content(text)
 
@@ -768,7 +797,7 @@ def expand_keys(node, warning, debug, **_kwargs) -> Content:
         # writable parameter, check whether to output additional text about
         # the Agent needing to choose unique initial values for
         # non-defaulted key parameters
-        if not is_conditional and access != 'readOnly':
+        if not is_conditional and obj_access != 'readOnly':
             # XXX have suppressed this boiler plate (it should be stated once);
             #     note that it's CWMP-specific
             # noinspection PyUnreachableCode
@@ -828,6 +857,34 @@ def expand_listitem(kind: str, **_kwargs) -> str:
     return '%s ' % kind
 
 
+def expand_minval(node, **_kwargs) -> str:
+    parameter = cast_node(Parameter, node.parent)
+    syntax = parameter.syntax
+    data_type = cast_node(_Number, syntax.type)
+    value = data_type.minval
+    if ranges := syntax.ranges_inherited:
+        # this cleans overlapping ranges and sorts the ranges
+        clean_ranges = cast(list[Range], Range.prange_clean(ranges))
+        override = clean_ranges[0].minInclusive
+        if override is not None:
+            value = override
+    return f'*{value}* (the minimum valid value)'
+
+
+def expand_maxval(node, **_kwargs) -> str:
+    parameter = cast_node(Parameter, node.parent)
+    syntax = parameter.syntax
+    data_type = cast_node(_Number, syntax.type)
+    value = data_type.maxval
+    if ranges := syntax.ranges_inherited:
+        # this cleans overlapping ranges and sorts the ranges
+        clean_ranges = cast(list[Range], Range.prange_clean(ranges))
+        override = clean_ranges[-1].maxInclusive
+        if override is not None:
+            value = override
+    return f'*{value}* (the maximum valid value)'
+
+
 def expand_notify(node, **_kwargs) -> str:
     parameter = cast_node(Parameter, node.parent)
     notify = parameter.activeNotify
@@ -879,13 +936,19 @@ def expand_null(name: str, scope: str, *, node: _HasContent,
     return Content(null)
 
 
-def expand_numentries(*, node, **_kwargs) -> Content:
+def expand_numentries(*, node, args, **_kwargs) -> Union[str, Content]:
     parameter = cast_node(Parameter, node.parent)
 
     # find the table object that references it (this will have been set by
     # the 'used' transform)
     if not (table := parameter.tableObjectNode):
-        raise MacroException('not associated with a table')
+        # if we have run the 'diff' transform and the numentries parameter has
+        # changed but its table hasn't changed, the 'used' transform won't have
+        # visited it, so avoid an error in this case
+        if any(str(t) == 'diff' for t in (args.transform or [])):
+            return 'The number of entries in the associated table.'
+        else:
+            raise MacroException('not associated with a table')
 
     return Content('The number of entries in the {{object|%s}} table.' %
                    table.h_nameonly or table.h_baseonly)
@@ -937,6 +1000,41 @@ def expand_profile(ref: str, *, node: _HasContent, **_kwargs) -> str:
     return "[*%s*](#%s)" % (ref, profile.anchor)
 
 
+def expand_range(*, index: str, node: _HasContent, **_kwargs) -> Content:
+    parameter = cast_node(Parameter, node.parent)
+    syntax = parameter.syntax
+    ranges = syntax.ranges_inherited
+    if not ranges:
+        raise MacroException("parameter doesn't have any ranges")
+
+    # if index is specified, it's the zero-based index of the range to be
+    # reported
+    if index:
+        if not index.isdigit():
+            raise MacroException(f"index {index} isn't a valid integer")
+        if int(index) >= len(ranges):
+            raise MacroException(f"index {index} is invalid (is "
+                                 f"zero-based, so should be less than "
+                                 f"{len(ranges)})")
+
+    texts = []
+    for i, rng in enumerate(ranges):
+        if index and i != int(index):
+            continue
+        text = rng.format(human=True)
+        # if there are units, insert them after all values; so '0 to 10'
+        # becomes '0 {{units}} to 10 {{units}}'
+        if syntax.units_inherited:
+            text = re.sub(r'(-?\d+(?:\.\d*)?)', r'\1 {{units}}', text)
+        # if there's a description, add it
+        if description := rng.description:
+            markdown = get_markdown_and_tidy(description.content,
+                                             node=description, **_kwargs)
+            text += f' ({markdown})'
+        texts.append(text)
+    return Content(Utility.nicer_list(texts, last=', or'))
+
+
 # XXX this is a complex function and should be in a separate module
 def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
     parameter = cast_node(Parameter, node.parent)
@@ -969,9 +1067,18 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
         else:
             raise MacroException('invalid option %s' % opt)
 
+    # determine whether this is a USP model and therefore has immutable
+    # non-functional keys
+    immutable_non_functional_keys = parameter.model_in_path.usp
+
     # it's assumed that this text will be generated after {{list}} (if present)
     # (this is guaranteed to be the case if they're auto-inserted)
     text = 'The value ' if not parameter.syntax.list else 'Each list item '
+
+    # determine whether the parameter is part of a non-functional unique key
+    unique_keys = parameter.uniqueKeyNodes
+    non_functional_key = any(not unique_key.functional for unique_key in
+                             unique_keys) if unique_keys else False
 
     # path references
     if isinstance(reference, PathRef):
@@ -1039,6 +1146,17 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
                     Utility.nicer_list(targets, r'{{object|\1|%s}}' % scope,
                                        last='or'), plural)
 
+                # add logical interface logic for layer 3 interfaces
+                target_parents_interfaces = []
+                for _, target in target_parents_good:
+                    if any(comp.ref.endswith('Layer3InterfaceParams') for
+                           comp in target.components):
+                        target_parents_interfaces.append(target)
+                if target_parents_interfaces:
+                    text += ', or the Path Name of an interface layered ' \
+                            'above such a row, e.g., a row in the ' \
+                            '{{object|.Logical.Interface.}} table'
+
         else:
             target_type = target_type.replace(
                     'single', 'single-instance object')
@@ -1071,7 +1189,8 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
                     text += ', or {{empty}}'
             elif not (path_ref.command_in_path or path_ref.event_in_path):
                 text += '. If the referenced %s is deleted, ' % target_type
-                if delete:
+                if delete or \
+                        (immutable_non_functional_keys and non_functional_key):
                     text += 'this instance MUST also be deleted (so the ' \
                             'parameter value will never be {{empty}})'
                 else:
@@ -1102,7 +1221,8 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
 
         if instance_ref.refType == 'strong':
             text += ' If the referenced row is deleted, '
-            if delete:
+            if delete or (
+                    immutable_non_functional_keys and non_functional_key):
                 text += 'this instance MUST also be deleted (so the ' \
                         'parameter value will never be {{null}}).'
             else:
@@ -1148,13 +1268,6 @@ def expand_reference(arg, opts, *, node, warning, debug, **_kwargs):
     return Content(text)
 
 
-# XXX experimental (ignore the old text when within one of these macros)
-# XXX ignoring the old text can mean that something marked as changed hasn't
-#     really changed; could move the macro ref up the stack, e.g.,
-#     {{param|{{replaced|A|B}}}} -> {{replaced|{{param|A}}|{{param|B}}}},
-#     which would (currently) become {{replaced|\{\{param\|A\}\}|{{param|B}}}},
-#     but this is rather complicated
-# XXX should handle removed, inserted and replaced in a single function
 ignore_old_macros = {'object', 'param', 'command', 'event', 'enum', 'bibref',
                      'deprecated', 'obsoleted', 'deleted'}
 
@@ -1184,26 +1297,40 @@ def removed_or_inserted(what: str, text: str) -> str:
     else:
         # in this case, head and tail should be defined, but we don't check
         head, tail = '\n\n', '\n\n'
-        body = '::: %s\n' % what + '\n'.join(comps) + '\n:::'
+        # XXX see expand_div() for why we use nine colons here
+        # XXX should add '{{div}}' return Content; then it would all be
+        #     handled by expand_div()
+        colons = 9 * ':'
+        body = '%s %s\n' % (colons, what) + '\n'.join(comps) + \
+               '\n%s' % colons
 
     return head + body + tail
 
 
 def expand_removed(text: str, info, stack, **_kwargs) -> str:
-    # XXX experimental (see above)
+    # e.g., {{param|{{replaced|OLD|NEW}}}} becomes {{param|NEW}}
     if {ref.name for ref in stack} & ignore_old_macros:
         info('ignored removed text %r within macro argument' % text)
         return ''
-    return removed_or_inserted('removed', Macro.unescape(text))
+    # XXX this used to pass Macro.unescape(text) but this dangerous, because
+    #     nothing prevents it being passed to Content() further up the macro
+    #     expansion stack; unescaping (if needed) should be done later
+    return removed_or_inserted('removed', text)
 
 
-def expand_inserted(text: str, **_kwargs) -> str:
+def expand_inserted(text: str, info, stack, **_kwargs) -> str:
+    # e.g., {{param|{{replaced|OLD|NEW}}}} becomes {{param|NEW}}
+    # XXX this loses the 'inserted' style, but this is a small price to pay
+    if {ref.name for ref in stack} & ignore_old_macros:
+        info('forwarded inserted text %r within macro argument' % text)
+        return text
     return removed_or_inserted('inserted', text)
 
 
 # XXX could this give a more explicit indication of what changed?
 def expand_replaced(old: str, new: str, info, stack, **_kwargs) -> str:
-    return expand_removed(old, info, stack) + expand_inserted(new)
+    # e.g., {{replaced|OLD|NEW}} becomes {{removed|OLD}}{{inserted|NEW}}
+    return expand_removed(old, info, stack) + expand_inserted(new, info, stack)
 
 
 def expand_secured(value, **_kwargs) -> Content:
@@ -1226,6 +1353,37 @@ def expand_showid(node: _HasContent, **_kwargs) -> str:
     # XXX note use of pandoc [text]{.mark} for highlighting; this is the
     #     wrong sort of highlighting! need to use different classes
     return "[**[%s]**]{.mark}" % node.parent.id
+
+
+def expand_size(*, index: str, node: _HasContent, **_kwargs) -> Content:
+    parameter = cast_node(Parameter, node.parent)
+    syntax = parameter.syntax
+    sizes = syntax.sizes_inherited
+    if not sizes:
+        raise MacroException("parameter doesn't have any sizes")
+
+    # if index is specified, it's the zero-based index of the range to be
+    # reported
+    if index:
+        if not index.isdigit():
+            raise MacroException(f"index {index} isn't a valid integer")
+        if int(index) >= len(sizes):
+            raise MacroException(f"index {index} is invalid (is "
+                                 f"zero-based, so should be less than "
+                                 f"{len(sizes)})")
+
+    texts = []
+    for i, size in enumerate(sizes):
+        if index and i != int(index):
+            continue
+        text = size.format(human=True)
+        # if there's a description, add it
+        if description := size.description:
+            markdown = get_markdown_and_tidy(description.content,
+                                             node=description, **_kwargs)
+            text += f' ({markdown})'
+        texts.append(text)
+    return Content(Utility.nicer_list(texts, last=', or'))
 
 
 def expand_span(classes: str, text: str, **_kwargs) -> str:
@@ -1411,7 +1569,7 @@ Macro('reference', arg=None, opts=None, macro_auto='before',
 # macros that aren't auto-included
 # - they are declared in alphabetical order
 Macro('', macro_body='')  # can use {{}} as a separator
-Macro('abbref', id=str, macro_body=expand_abbref)
+Macro('abbref', id=None, macro_body=expand_abbref)
 Macro('bibref', id=str, section=None, macro_body=expand_bibref)
 Macro('appdate', date=str, macro_body='')
 # this isn't final, so can be overridden without generating a warning
@@ -1425,10 +1583,12 @@ Macro('empty', style='default', macro_body=expand_empty)
 Macro('event', ref=None, scope_or_status='normal',
       macro_body=expand_itemref)
 Macro('false', macro_body="*false*")
-Macro('gloref', id=str, macro_body=expand_gloref)
+Macro('gloref', id=None, macro_body=expand_gloref)
 Macro('inserted', text=str, macro_body=expand_inserted)
 Macro('issue', descr_or_opts=str, descr=None, macro_body=expand_issue)
 Macro('li', kind=str, macro_body=expand_listitem)
+Macro('minval', macro_body=expand_minval)
+Macro('maxval', macro_body=expand_maxval)
 Macro('nl', macro_body=expand_whitespace)
 Macro('np', macro_body=expand_whitespace)
 Macro('ns', macro_body=expand_whitespace)
@@ -1440,9 +1600,11 @@ Macro('obsoleted', version=str, reason=None, macro_body=expand_status)
 Macro('param', ref=None, scope_or_status='normal',
       macro_body=expand_itemref)
 Macro('profile', ref=None, macro_body=expand_profile)
+Macro('range', index=None, macro_body=expand_range)
 Macro('removed', text=str, macro_body=expand_removed)
 Macro('replaced', old=str, new=str, macro_body=expand_replaced)
 Macro('section', category=None, macro_body='')
+Macro('size', index=None, macro_body=expand_size)
 Macro('span', classes='', text='', macro_body=expand_span)
 # XXX {{templ}} is deprecated; its use should output a warning
 Macro('templ', id=str, macro_body=expand_template)

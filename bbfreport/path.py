@@ -40,9 +40,11 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
+from __future__ import annotations
+
 import re
 
-from typing import Any, Optional, Union
+from typing import Any
 
 from .logging import Logging
 from .property import Null, NullType
@@ -145,7 +147,7 @@ class Path:
         assert len(self._comps) > 0
 
     def absolute_path(self, objpath: 'Path', *,
-                      scope: Optional[ScopeEnum] = None) -> 'Path':
+                      scope: ScopeEnum | None = None) -> Path:
         assert isinstance(objpath, Path) and objpath.uplevels == 0
 
         # objpath can reference an object, parameter, command or event, but its
@@ -238,36 +240,36 @@ class Path:
         assert relpath._uplevels == 0
         return relpath
 
-    def _isempty(self):
+    def _isempty(self) -> bool:
         return self._uplevels == 0 and self._comps[0] == '' and len(
                 self._comps) == 1
 
-    def _startswithdot(self):
+    def _startswithdot(self) -> bool:
         return self._uplevels == 0 and self._comps[0] == '' and len(
                 self._comps) > 1
 
     # checks whether a path starts with 'Device.'; also checks for starting
     # with 'InternetGatewayDevice.'
-    def _startswithdevice(self):
+    def _startswithdevice(self) -> bool:
         return self._uplevels == 0 and len(self._comps) > 1 and \
                self._comps[0] in {'InternetGatewayDevice', 'Device'}
 
     # return empty string if we can't determine top-level object from the path,
     # e.g. if there's only one component it's a top-level parameter
-    def _toplevel(self, dot=False):
+    def _toplevel(self, dot: bool = False) -> str:
         return '' if (self._uplevels > 0 or len(self._comps) == 1) else \
             (self._comps[0] + ('.' if dot else ''))
 
-    def __str__(self):
+    def __str__(self) -> str:
         uplevels = (('#' * self._uplevels) + '.') if self._uplevels else ''
         return uplevels + '.'.join(self._comps)
 
     @property
-    def uplevels(self):
+    def uplevels(self) -> str:
         return self._uplevels
 
     @property
-    def comps(self):
+    def comps(self) -> list[str]:
         return self._comps[:]
 
     # alias
@@ -281,13 +283,13 @@ def set_entity_map(node: Node) -> None:
 
 
 # XXX this used to return None on failure, but Null makes more sense
-def get_entity(objpath: str, model: Node) -> Union[Node, NullType]:
+def get_entity(objpath: str, model: Node) -> Node | NullType:
     return Null if model not in Path.entity_map else \
         Path.entity_map[model].get(objpath, Null)
 
 
 def absolute_path(target: str, objpath: str, *,
-                  scope: Optional[ScopeEnum] = None) -> str:
+                  scope: ScopeEnum | None = None) -> str:
     return str(Path(target).absolute_path(Path(objpath), scope=scope))
 
 
@@ -295,7 +297,7 @@ def absolute_path(target: str, objpath: str, *,
 # XXX this should be integrated into the Path class and could almost certainly
 #     share more of its logic, e.g. command and event special cases
 def relative_path(target: str, objpath: str, *,
-                  scope: Optional[ScopeEnum] = None, strip: int = 0):
+                  scope: ScopeEnum | None = None, strip: int = 0):
     # target is probably absolute already, but this isn't required
     atarget = absolute_path(target, objpath, scope=scope)
 
@@ -365,9 +367,9 @@ command_or_event_pattern = re.compile(r'(\(\)|!)$')
 
 
 def follow_reference(node: Node,
-                     target_or_targets: Optional[Union[str, list[str]]], *,
-                     scope: Optional[ScopeEnum] = None,
-                     quiet: bool = False) -> Union[Node, NullType]:
+                     target_or_targets: str | list[str] | None, *,
+                     scope: ScopeEnum | None = None,
+                     quiet: bool = False) -> Node | NullType:
     # protect against being called with a Null node
     if not node:
         return Null

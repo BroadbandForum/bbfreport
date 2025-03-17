@@ -1,6 +1,6 @@
-"""HTML report format plugin."""
+"""Shared plugin support."""
 
-# Copyright (c) 2022-2025, Broadband Forum
+# Copyright (c) 2025, Broadband Forum
 #
 # Redistribution and use in source and binary forms, with or
 # without modification, are permitted provided that the following
@@ -39,38 +39,3 @@
 #
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
-
-# pyright: reportUnusedFunction=false
-
-import argparse
-import logging
-
-from typing import Any
-
-from ..macro import Macro
-from ..node import Root
-from ..visitor import Rules
-
-from .shared.markdown import ModelTableElem, Report
-
-
-# return type is argparse._ArgumentGroup (it's private and not exported)
-def _add_arguments_(arg_parser: argparse.ArgumentParser) -> Any:
-    arg_group = arg_parser.add_argument_group('html report format arguments')
-    arg_group.add_argument('--html-use-commonmark', action='store_true',
-                           help='use the built-in (and currently much '
-                                'slower) Commonmark parser')
-    return arg_group
-
-
-def _post_init_() -> None:
-    # redefine the 'classes' macro (if it was originally declared as non-final,
-    # this won't output a warning)
-    Macro('classes', default='', macro_body=ModelTableElem.expand_classes)
-
-
-# visit the node tree
-def visit(root: Root, args: argparse.Namespace, *, omit_if_unused: bool,
-          rules: Rules, logger: logging.Logger) -> None:
-    Report(root, args, omit_if_unused=omit_if_unused, rules=rules,
-           logger=logger)

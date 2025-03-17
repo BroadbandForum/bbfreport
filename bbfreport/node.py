@@ -246,7 +246,8 @@ class _Mergeable:
         """
         pass
 
-    def format(self, human: bool = False, **kwargs) -> str:
+    def format(self, human: bool = False, brief: bool = False,
+               only: bool = False, **kwargs) -> str:
         """A formatted string representation of this object.
 
         The default implementation returns an empty string.
@@ -831,7 +832,7 @@ class _Node(_Mergeable):
         # (but no conversion to lower-case)
         path = re.sub(r'[^\w:.-]', '', path)
 
-        # D:Device:2.Device.ATM.Link.
+        # D.Device:2.Device.ATM.Link.
         # XXX need to extend the prefixes; get them from the class hierarchy?
         prefix_map = {AbbreviationsItem: 'A', DataType: 'T', GlossaryItem: 'G',
                       Profile: 'P', Reference: 'R'}
@@ -979,6 +980,8 @@ class _Node(_Mergeable):
                                   r'reference|syntax)(.+)$', r'\2', name))
         if name.startswith('dt_') and name != 'dt_document':
             name = name[3:]
+        if name == 'decimalRange' and self.parent.typename == 'decimal':
+            name = 'range'
         name = name.replace('_', ':')
         return name
 
@@ -1120,7 +1123,7 @@ class _Base0(_Node):
 
     xmlns_dmr = PropDescr(NamespaceStrAttr, doc='DMR namespace.')
 
-    dmr_version = PropDescr(VersionStrAttr, levels=2, doc='DMR version.',
+    dmr_version = PropDescr(VersionStrAttr, doc='DMR version.',
                             deprecated='replaced by `version`')
 
     # XXX should move this down the hierarchy so can sometimes set as mandatory
@@ -1334,8 +1337,7 @@ class _Base0(_Node):
 class _Base(_Base0):
     status = PropDescr(EnumObjAttr, enum_cls=StatusEnum, doc='Node status.')
 
-    version = PropDescr(VersionStrAttr, levels=3, doc='Node version (added '
-                                                      'in DM v1.7).')
+    version = PropDescr(VersionStrAttr, doc='Node version (added in DM v1.7).')
 
     # this searches the node's ancestors for the attribute
     @property
@@ -2983,6 +2985,14 @@ class _Item(_HasDescription):
         """The `id` attribute."""
         return dct.get('id')
 
+    # this is only called when merging into an existing instance
+    def _mergeprep(self, *, stack: Optional[Stack] = None,
+                   report: Optional[Report] = None) -> None:
+        logger.warning('%s: duplicate %s (replaces original defined in '
+                       '%s.xml)' % (self.nicepath, self.typename,
+                                    self.instance_in_path(Xml_file)))
+        return super()._mergeprep(stack=stack, report=report)
+
     def _mergedone(self, *, stack=None, report=None):
         """Check that the `id` attribute was specified, and mark this item
         as not (yet) having been used.
@@ -3035,7 +3045,7 @@ class Bibliography(_HasDescription):
         return cls.__name__
 
 
-# XXX this is keyed by 'id', so it should be an _Item (a _TextItem?)
+# XXX this is keyed by 'id', so it should be an _Item
 class Template(_HasContent):
     """The description templates.
     """
@@ -3046,22 +3056,25 @@ class Template(_HasContent):
         """The `id` attribute."""
         return dct.get('id')
 
+    # this is only called when merging into an existing instance
     # XXX logically this would be on _Base, which defines 'comments',
     #     'cdatas' and 'others', but is appears only to be needed here, so
     #     we'll define it here for now
-    # XXX this is a bit of a hack really; templates are keyed, so if we didn't
-    #     do this, comments, cdatas and others would be extended when merging
     def _mergeprep(self, *, stack: Optional[Stack] = None,
                    report: Optional[Report] = None) -> None:
-        if report:
-            logger.debug('%s: mergeprep %r' % (report, self))
-
+        # XXX this is a bit of a hack really; templates are keyed, so if we
+        #     didn't do this, comments, cdatas and others would be extended
+        #     when merging
         self.comments = None
         self.cdatas = None
         self.others = None
 
-        if report:
-            logger.debug('%s: mergeprep %r done' % (report, self))
+        # check for duplicate definition (some templates are redefined,
+        # so this is reported at the info level)
+        logger.info('%s: duplicate %s (replaces original defined in '
+                    '%s.xml)' % (self.nicepath, self.typename,
+                                 self.instance_in_path(Xml_file)))
+        return super()._mergeprep(stack=stack, report=report)
 
     def _mergedone(self, *, stack=None, report=None):
         """Check that the `id` attribute was specified, and mark this item
@@ -3083,11 +3096,9 @@ class Template(_HasContent):
         return self.id or ''
 
 
+# XXX this is keyed by 'id', so it should be an _Item
 class Reference(_Base):
     """A bibliographic reference.
-
-    Note:
-        This is keyed by `id`, so it should be an `_Item`.
     """
 
     name = PropDescr(SingleElem, node_cls='ReferenceName',
@@ -3109,6 +3120,14 @@ class Reference(_Base):
     def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
         """The `id` attribute."""
         return dct.get('id')
+
+    # this is only called when merging into an existing instance
+    def _mergeprep(self, *, stack: Optional[Stack] = None,
+                   report: Optional[Report] = None) -> None:
+        logger.info('%s: duplicate %s (replaces original defined in '
+                    '%s.xml)' % (self.nicepath, self.typename,
+                                 self.instance_in_path(Xml_file)))
+        return super()._mergeprep(stack=stack, report=report)
 
     def _mergedone(self, *, stack=None, report=None):
         """Check that the `id` attribute was specified, and mark this item
@@ -3193,12 +3212,12 @@ class Component(_HasDescription, ComponentAccessor):
         # if defermerge, assume that data is of the form (('name', name),
         # ('foo', foo), ...), use the first element to set name, and pass the
         # rest to the super-class for later expansion
-        # XXX shouldn't assume that 'name' is first, or that 'virtual' (when
-        #     present) is second
-        # XXX if defermerge, should also pick off other fields such as status
-        #     and description (then wouldn't need to worry about them later)
-        #     (we're already doing this for 'virtual')
-        name, virtual, data_ = None, None, data
+        # XXX if defermerge, we also pick off 'virtual' etc., and should pick
+        #     off further fields such as 'status' and 'description' (then we
+        #     wouldn't need to worry about them in ComponentRef.__relocate())
+        # XXX we shouldn't assume anything about the order of the 'name',
+        #     'virtual' etc. attributes
+        name, virtual, dmr_no_name_check, data_ = None, None, None, data
         if defermerge:
             assert data and data[0][0] == 'name'
             name = data[0][1]
@@ -3207,6 +3226,9 @@ class Component(_HasDescription, ComponentAccessor):
                 data_ = None
             elif data_[0][0] == 'virtual':
                 virtual = Utility.boolean(data_[0][1])
+                data_ = data_[1:]
+            elif data_[0][0] == 'dmr_noNameCheck':
+                dmr_no_name_check = Utility.boolean(data_[0][1])
                 data_ = data_[1:]
 
         super().__init__(key=key, data=data_, defermerge=defermerge,
@@ -3217,6 +3239,7 @@ class Component(_HasDescription, ComponentAccessor):
         if defermerge:
             self.name = name
             self.virtual = virtual
+            self.dmr_noNameCheck = dmr_no_name_check
 
         # do this here rather than in _mergedone() in case merge was deferred
         self.update_entities(self.name)
@@ -3522,8 +3545,13 @@ class ComponentRef(_Base):
         return f'{ref}{extra}'
 
 
+# TBD common (_Dm_modelItem, _Dt_modelItem) items
+class _ModelItem(_Mixin):
+    pass
+
+
 # name or base must be specified; also see _mergedone() logic
-class _ModelItem(_HasDescription):
+class _Dm_modelItem(_HasDescription, _ModelItem):
     """Base class for models and their parameters, objects, commands,
     events and profiles. All these nodes have `Description`, `name` (for
     new nodes) and `base` (for nodes based on another node) attributes.
@@ -3557,10 +3585,10 @@ class _ModelItem(_HasDescription):
         #     so it's been disabled
         if False and not self.args.thisonly and \
                 self.name is not None and self.base is None:
-            self._previous_lexical = _ModelItem.__previous_lexical
+            self._previous_lexical = _Dm_modelItem.__previous_lexical
             logger.warning('%s: set previous_lexical to %s' % (
-                self.objpath, _ModelItem.__previous_lexical))
-            _ModelItem.__previous_lexical = self.name
+                self.objpath, _Dm_modelItem.__previous_lexical))
+            _Dm_modelItem.__previous_lexical = self.name
 
         # if --thisonly, don't complain or change anything
         if self.args.thisonly:
@@ -3621,9 +3649,21 @@ class _Model(_Mixin):
     pass
 
 
-class Model(_ModelItem, _Model, ModelAccessor):
+# XXX should models be model items?
+class Model(_Dm_modelItem, _Model, ModelAccessor):
     """A model definition.
     """
+
+    # these are the first model versions that supported USP (the dict is
+    # indexed by 'Device:2' etc.)
+    FIRST_USP_VERSIONS = {version.prefix + str(version.comps[0]):
+                              version for version in (
+        Version('Device:2.12'),
+        Version('FAPService:2.1.1'),
+        Version('StorageService:1.3.1'),
+        Version('STBService:1.4.1'),
+        Version('VoiceService:2.0.1')
+    )}
 
     isService = PropDescr(BoolAttr, default=False,
                           doc='Whether this is a ``Service`` model.')
@@ -3639,9 +3679,9 @@ class Model(_ModelItem, _Model, ModelAccessor):
         """The `Xml_file` name and the `_ModelItem.base` or (as a fallback)
         `_ModelItem.name` attribute with the minor version removed."""
 
-        name, base = (dct.get(a) for a in ('name', 'base'))
-        base_or_name_major = re.sub(r'([^:]+):(\d+)\.(\d+)', r'\1:\2',
-                                    base or name or '')
+        base, name = (dct.get(a) for a in ('base', 'name'))
+        version = Version(base or name or '')
+        base_or_name_major = '%s%d' % (version.prefix, version.comps[0])
 
         # XXX this might have been defined under a different name in a
         #     separate file (the common case is importing XXX as _XXX),
@@ -3681,28 +3721,39 @@ class Model(_ModelItem, _Model, ModelAccessor):
             assert data and data[0][0] in {'name', 'ref'}
             self.name = data[0][1]
 
-        # do this here rather than in _mergedone() in case merge was deferred
+        # do this here (as well as in _mergedone()) in case merge was deferred
         self.update_entities(self.name)
         logger.debug('defined model %s (in %s)' % (
             self.name, self.instance_in_path(Xml_file).relpath))
+
+    def _mergedone(self, *, stack=None, report=None):
+        # this is needed to add the new model name, where a model is derived
+        # from an existing one
+        self.update_entities(self.name)
+        super()._mergedone(stack=stack, report=report)
 
     # the current (latest) model version; taken from the version attribute
     # if present, otherwise derived from the model name
     @property
     @cache
     def model_version(self) -> Version:
-        return self.version or Version(re.sub(r'.*:', '', self.name))
+        return self.version or Version(self.name)
 
-    # the version at which the model was created; always an n.0 version
+    # the version at which the model was first created
     @property
     @cache
     def version_inherited(self) -> Version:
         if self.version is not None:
             return cast(Version, self.version)
         else:
-            major = re.findall(r':(\d+)', self.name)
-            assert len(major) == 1
-            return Version('%s.0' % major[0])
+            model_version = self.model_version
+            first_version = model_version.reset(1)
+            if self.usp:
+                first_usp_version = \
+                    self.FIRST_USP_VERSIONS.get(self.keylast, first_version)
+                if first_version < first_usp_version:
+                    first_version = first_usp_version
+            return first_version
 
     # this is needed in order to get Model's version_inherited behavior
     @property
@@ -3731,14 +3782,12 @@ class Model(_ModelItem, _Model, ModelAccessor):
     # XXX should also provide a --usp command-line option and/or should
     #     provide a set of flags such as 'ignore enable parameter'
     @property
-    @cache
     def usp(self) -> bool:
-        # first check the XML file name
-        # noinspection PyTypeChecker
-        xml_file = self.instance_in_path(
-                Xml_file, predicate=lambda n: isinstance(n.parent, Root))
-        if str(xml_file).endswith('-usp'):
-            return True
+        # first check the path for an XML file name ending '-usp.xml'
+        node = self
+        while node := node.parent:
+            if isinstance(node, Xml_file) and str(node).endswith('-usp'):
+                return True
 
         # next check for commands or events
         if self.findall(Command) or self.findall(Event):
@@ -3746,10 +3795,14 @@ class Model(_ModelItem, _Model, ModelAccessor):
 
         return False
 
-    def format(self, **kwargs) -> str:
+    def format(self, *, brief: bool = False, only: bool = False, **kwargs) \
+            -> str:
         """TBD.
         """
-        return super().format(**kwargs) or self.name
+        if kwargs:
+            return super().format(**kwargs) or self.name or self.typename
+        else:
+            return re.sub(r'\.\d+$', '', self.name)
 
 
 # TBD common (Object, _Dt_object) items
@@ -3764,7 +3817,7 @@ class _Object(_Mixin):
         return head, tail
 
 
-class Object(_ModelItem, _Object):
+class Object(_Dm_modelItem, _Object):
     """An object definition.
 
     Note:
@@ -3890,10 +3943,10 @@ class Object(_ModelItem, _Object):
     @property
     @cache
     def h_objects(self) -> ListElem.ListWrapper['Object']:
-        model = self.instance_in_path(Model)
-        assert model is not None
+        container = self.instance_in_path((Model, _Arguments, Event))
+        assert container is not None
         objs = ListElem.ListWrapper()
-        for obj in model.objects:
+        for obj in container.objects:
             head, _ = self._path_split(obj.objpath)
             if head == self.objpath:
                 objs += [obj]
@@ -3995,7 +4048,7 @@ class Object(_ModelItem, _Object):
     }
 
     def format(self, *, typ: bool = False, human: bool = False,
-               **kwargs) -> str:
+               brief: bool = False, only: bool = False, **kwargs) -> str:
         text = super().format(**kwargs)
         if typ:
             text = self.typename
@@ -4009,6 +4062,10 @@ class Object(_ModelItem, _Object):
                 if self.maxEntries is not None:
                     text += str(self.maxEntries)
                 text += ')'
+        if brief:
+            _, text = self._path_split(text)
+        if only:
+            text = re.sub(r'(\.{i})?\.$', '', text)
         # there's no special human-readable version
         return text
 
@@ -4018,7 +4075,7 @@ class _Command(_Mixin):
     pass
 
 
-class Command(_ModelItem, _Command):
+class Command(_Dm_modelItem, _Command):
     """A command definition.
     """
 
@@ -4062,6 +4119,24 @@ class _Arguments(_HasDescription):
         ``.``)."""
         return parent.key, cls.__name__ + '.'
 
+    # XXX should try to optimize this
+    @property
+    @cache
+    def h_objects(self) -> ListElem.ListWrapper['Object']:
+        objs = {}
+        for obj in self.objects:
+            path = Path(obj.nameOrBase)
+            name, *rest = path.comps
+            if len(rest) == 1 and name not in objs:
+                objs[name] = obj
+        return ListElem.ListWrapper(objs.values())
+
+    @property
+    @cache
+    def h_elems(self) -> tuple[Node, ...]:
+        return tuple(elem for elem in self.elems if not
+                     isinstance(elem, Object) or elem in self.h_objects)
+
 
 # TBD common (Input, _Dt_input) items
 class _Input(_Mixin):
@@ -4086,7 +4161,7 @@ class _Event(_Mixin):
     pass
 
 
-class Event(_ModelItem, _Event):
+class Event(_Dm_modelItem, _Event):
     """An event definition.
     """
 
@@ -4109,6 +4184,24 @@ class Event(_ModelItem, _Event):
         return model_or_component.key, parent.objpath, (
                 name or base or '') + '.'
 
+    # XXX should try to optimize this
+    @property
+    @cache
+    def h_objects(self) -> ListElem.ListWrapper['Object']:
+        objs = {}
+        for obj in self.objects:
+            path = Path(obj.nameOrBase)
+            name, *rest = path.comps
+            if len(rest) == 1 and name not in objs:
+                objs[name] = obj
+        return ListElem.ListWrapper(objs.values())
+
+    @property
+    @cache
+    def h_elems(self) -> tuple[Node, ...]:
+        return tuple(elem for elem in self.elems if not
+                     isinstance(elem, Object) or elem in self.h_objects)
+
 
 class UniqueKey(_Base):
     """An `Object` unique key definition.
@@ -4127,7 +4220,7 @@ class _Parameter(_Mixin):
     pass
 
 
-class Parameter(_ModelItem, _Parameter):
+class Parameter(_Dm_modelItem, _Parameter):
     """A parameter definition.
 
     Note:
@@ -5236,7 +5329,8 @@ class Units(_Facet):
         return self.value or ''
 
 
-class Profile(_ModelItem):
+# XXX should profiles be model items?
+class Profile(_Dm_modelItem):
     """A profile definition.
     """
 
@@ -5392,6 +5486,15 @@ class _ProfileItem(_HasDescription):
     # some subclasses override this
     requirement = None
 
+    @classmethod
+    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
+        """The parent `Profile` key, `ObjectRef` path and the
+        `_ProfileItem.ref` attribute."""
+
+        assert (profile := parent.profile_in_path) is not None
+        return profile.key, parent.fullpath(
+                style='object+notprofile'), dct.get('ref')
+
     def _mergedone(self, *, stack=None, report=None):
         """Check that the ``ref`` attribute was specified."""
 
@@ -5403,7 +5506,7 @@ class _ProfileItem(_HasDescription):
     # noinspection PyPep8Naming
     @property
     @cache
-    def refNode(self) -> Union['_ModelItem', NullType]:
+    def refNode(self) -> Union['_Dm_modelItem', NullType]:
         """Get the node referenced by `ref`.
 
         Returns:
@@ -5428,12 +5531,14 @@ class ObjectRef(_ProfileItem):
     parameters = PropDescr(ListElem, plural=True, node_cls='ParameterRef',
                            doc='Object parameters.')
 
+    # ObjectRef overrides this because its key doesn't include the parent path,
+    # which is always empty
     @classmethod
     def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
-        """The parent `Profile` key and the `_ProfileItem.ref`
-        attribute."""
-        assert parent.instance_in_path(Profile) is not None
-        return parent.instance_in_path(Profile).key, dct.get('ref')
+        """The parent `Profile` key and the `_ProfileItem.ref` attribute."""
+
+        assert (profile := parent.profile_in_path) is not None
+        return profile.key, dct.get('ref')
 
     # noinspection PyPep8Naming
     @property
@@ -5467,14 +5572,11 @@ class ParameterRef(_ProfileItem):
 
     @classmethod
     def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
-        """The parent `Profile` key, `ObjectRef` path and the
-        `_ProfileItem.ref` attribute."""
-        # XXX temporary until we have a ParameterKey class
-        if isinstance(parent, UniqueKey):
-            return None
-        assert parent.instance_in_path(Profile) is not None
-        return parent.instance_in_path(Profile).key, parent.objpath, dct.get(
-                'ref')
+        """``None`` if within a `UniqueKey`, or else the parent `Profile` key,
+        `ObjectRef` path and the `_ProfileItem.ref` attribute."""
+
+        return None if isinstance(parent, UniqueKey) else super().calckey(
+                parent, dct, **kwargs)
 
     # noinspection PyPep8Naming
     @property
@@ -5511,14 +5613,6 @@ class CommandRef(_ProfileItem):
                       doc='Command input arguments.')
     output = PropDescr(SingleElem, node_cls='OutputRef',
                        doc='Command output arguments.')
-
-    @classmethod
-    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
-        """The parent `Profile` key, `ObjectRef` path and the
-        `_ProfileItem.ref` attribute (plus a ``.``)."""
-        assert parent.instance_in_path(Profile) is not None
-        return parent.instance_in_path(Profile).key, parent.objpath, dct.get(
-                'ref') + '.'
 
     # noinspection PyPep8Naming
     @property
@@ -5574,14 +5668,6 @@ class EventRef(_ProfileItem):
                         doc='Event objects.')
     parameters = PropDescr(ListElem, plural=True, node_cls='ParameterRef',
                            doc='Event parameters.')
-
-    @classmethod
-    def calckey(cls, parent: Node, dct: dict, **kwargs) -> Key:
-        """The parent `Profile` key, `ObjectRef` path and the
-        `_ProfileItem.ref` attribute (plus a ``.``)."""
-        assert parent.instance_in_path(Profile) is not None
-        return parent.instance_in_path(Profile).key, parent.objpath, dct.get(
-                'ref') + '.'
 
     # noinspection PyPep8Naming
     @property
@@ -5659,11 +5745,13 @@ class _Dt_item(_Base0):
         raise NotImplementedError
 
     # need explicit implementation because otherwise would get _Node.format()
-    def format(self, typ: bool = False, **kwargs) -> str:
-        if not typ:
+    def format(self, typ: bool = False, brief: bool = False, **kwargs) -> str:
+        if not typ and not brief:
             return self.ref or super().format(**kwargs)
-        else:
+        elif typ:
             return self.refNode.format(typ=typ, **kwargs)
+        elif brief:
+            return self.refNode.format(brief=brief, **kwargs)
 
     # this gets public attributes from the referenced object
     def __getattr__(self, attr) -> Any:
@@ -5681,8 +5769,23 @@ class _Dt_item(_Base0):
 
 
 # noinspection PyPep8Naming
+class _Dt_modelItem(_Dt_item, _ModelItem):
+    annotation = PropDescr(DescriptionSingleElem, node_cls='Dt_annotation',
+                           doc="Annotation.")
+
+    # this has to be defined on the _Dt_modelItem so its parent is in the DT
+    # tree (if it was accessed via refNode, its parent would be in the DM tree)
+    # XXX this was added by DMR-473 PR, which changed DT items to be
+    #     _ModelItems, but it means that DT descriptions are always Null; it's
+    #     been disabled but this might expose the reason why it was added in
+    #     the first place
+    # description = PropDescr(DescriptionSingleElem, doc="Referenced node's "
+    #                                                    "description.")
+
+
+# noinspection PyPep8Naming
 # XXX would like this to be a Model, but this doesn't currently work
-class Dt_model(_Dt_item, _Model):
+class Dt_model(_Dt_modelItem, _Model):
     parameters = PropDescr(ListElem, plural=True, node_cls='Dt_parameter')
     objects = PropDescr(ListElem, plural=True, node_cls='Dt_object')
 
@@ -5727,7 +5830,7 @@ class Dt_model(_Dt_item, _Model):
 
 
 # noinspection PyPep8Naming
-class Dt_object(_Dt_item, _Object):
+class Dt_object(_Dt_modelItem, _Object):
     # XXX the DT schema doesn't permit this; this is an error?
     access = PropDescr(EnumObjAttr, enum_cls=Dt_objectAccessEnum,
                        doc='Object access.')
@@ -5793,10 +5896,10 @@ class Dt_object(_Dt_item, _Object):
     @property
     @cache
     def h_objects(self) -> ListElem.ListWrapper['Dt_object']:
-        model = self.instance_in_path(Dt_model)
-        assert model is not None
+        container = self.instance_in_path((Dt_model, _Dt_arguments, Dt_event))
+        assert container is not None
         objs = ListElem.ListWrapper()
-        for obj in model.objects:
+        for obj in container.objects:
             head, _ = self._path_split(obj.objpath)
             if head == self.objpath:
                 objs += [obj]
@@ -5810,7 +5913,7 @@ class Dt_object(_Dt_item, _Object):
 
 
 # noinspection PyPep8Naming
-class Dt_parameter(_Dt_item, _Parameter):
+class Dt_parameter(_Dt_modelItem, _Parameter):
     access = PropDescr(EnumObjAttr, enum_cls=ParameterAccessEnum,
                        doc='Parameter access.')
     activeNotify = PropDescr(EnumObjAttr, enum_cls=Dt_activeNotifyEnum,
@@ -5835,7 +5938,7 @@ class Dt_parameter(_Dt_item, _Parameter):
 
 
 # noinspection PyPep8Naming
-class Dt_command(_Dt_item, _Command):
+class Dt_command(_Dt_modelItem, _Command):
     # XXX invalid node_cls isn't detected, e.g. 'Dt_Input' typo
     input = PropDescr(SingleElem, node_cls='Dt_input',
                       doc='Command input arguments.')
@@ -5858,11 +5961,14 @@ class Dt_command(_Dt_item, _Command):
                                 quiet=PATH_QUIET)
 
     def format(self, **kwargs) -> str:
-        return super().format(**kwargs) + '.'
+        text = super().format(**kwargs)
+        if not text.endswith('.'):
+            text += '.'
+        return text
 
 
 # noinspection PyPep8Naming
-class _Dt_arguments(_Dt_item):
+class _Dt_arguments(_Dt_modelItem):
     parameters = PropDescr(ListElem, plural=True, node_cls='Dt_parameter')
     objects = PropDescr(ListElem, plural=True, node_cls='Dt_object')
 
@@ -5877,6 +5983,24 @@ class _Dt_arguments(_Dt_item):
         """
 
         return self.instance_in_path(Dt_command).refNode
+
+    # XXX should try to optimize this
+    @property
+    @cache
+    def h_objects(self) -> ListElem.ListWrapper['Object']:
+        objs = {}
+        for obj in self.objects:
+            path = Path(obj.nameOrBase)
+            name, *rest = path.comps
+            if len(rest) == 1 and name not in objs:
+                objs[name] = obj
+        return ListElem.ListWrapper(objs.values())
+
+    @property
+    @cache
+    def h_elems(self) -> tuple[Node, ...]:
+        return tuple(elem for elem in self.elems if not
+                     isinstance(elem, Dt_object) or elem in self.h_objects)
 
     # the refNode is the command, so can't use its .format()
     def format(self, **kwargs) -> str:
@@ -5894,7 +6018,7 @@ class Dt_output(_Dt_arguments, _Output):
 
 
 # noinspection PyPep8Naming
-class Dt_event(_Dt_item, _Event):
+class Dt_event(_Dt_modelItem, _Event):
     parameters = PropDescr(ListElem, plural=True, node_cls='Dt_parameter')
     objects = PropDescr(ListElem, plural=True, node_cls='Dt_object')
 
@@ -5913,8 +6037,29 @@ class Dt_event(_Dt_item, _Event):
         return follow_reference(node, self.ref, scope=ScopeEnum('normal'),
                                 quiet=PATH_QUIET)
 
+    # XXX should try to optimize this
+    @property
+    @cache
+    def h_objects(self) -> ListElem.ListWrapper['Object']:
+        objs = {}
+        for obj in self.objects:
+            path = Path(obj.nameOrBase)
+            name, *rest = path.comps
+            if len(rest) == 1 and name not in objs:
+                objs[name] = obj
+        return ListElem.ListWrapper(objs.values())
+
+    @property
+    @cache
+    def h_elems(self) -> tuple[Node, ...]:
+        return tuple(elem for elem in self.elems if not
+                     isinstance(elem, Dt_object) or elem in self.h_objects)
+
     def format(self, **kwargs) -> str:
-        return super().format(**kwargs) + '.'
+        text = super().format(**kwargs)
+        if not text.endswith('.'):
+            text += '.'
+        return text
 
 
 # add class hierarchy

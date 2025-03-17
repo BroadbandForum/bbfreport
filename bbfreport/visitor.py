@@ -45,12 +45,12 @@ import re
 
 from types import ModuleType
 
-from typing import Any, Callable, cast, Optional, \
-    Union
+from typing import Any, Callable, cast, Optional, Union
 
 from .layout import Doc
 from .logging import Logging
-from .node import _Accessor, _Node, Node, NodeOrMixinType, Root, varname
+from .node import _Accessor, DataType, _Node, Node, NodeOrMixinType, \
+    Root, varname, Xml_file
 from .plugin import Plugin
 from .utility import Utility
 
@@ -393,7 +393,7 @@ class Visitor(Plugin):
         # (if present); it can be called anything (other that 'cls' etc.)
         known_arg_names = ['cls', 'self', 'node']
         known_kwarg_names = ['level', 'state', 'rules', 'args', 'logger',
-                             'name']
+                             'error', 'warning', 'info', 'debug', 'name']
 
         seen_node = False
         arg_names = []
@@ -793,11 +793,37 @@ class Visitor(Plugin):
             body = Doc()
         body_ = Doc()
 
-        # XXX experimental logic moved from xmlFormat.py; need explanation!
-        from .format import Format
+        # always use the 'thisonly' rules when reporting global items
+        # (otherwise we'd just ignore all the nodes we're trying to report)
         rules = Rules(thisonly=True, hierarchical=rules.hierarchical,
                       depth_first=rules.depth_first)
-        omit_if_unused = not node.args.all and isinstance(self, Format)
+
+        # determine whether a given node (and its descendants) should be
+        # omitted if unused
+        def get_omit_if_unused(nod: Node) -> bool:
+            # never omit unused nodes in transforms (only in formats)
+            from .transform import Transform
+            if isinstance(self, Transform):
+                return False
+
+            # always omit unused nodes if --all wasn't specified
+            elif not nod.args.all:
+                return True
+
+            # special case: always omit unused primitive data types
+            # (these are created dynamically, not in XML files)
+            elif isinstance(nod, DataType) and re.match(r'^[a-z]', nod.name):
+                return True
+
+            # otherwise only omit unused nodes not defined in command-line
+            # files
+            else:
+                command_line_file_names = [
+                    Utility.path_nameonly(f) for f in node.args.file]
+                xml_file = instance.instance_in_path(Xml_file)
+                defined_in_command_line_file = \
+                    str(xml_file) in command_line_file_names
+                return not defined_in_command_line_file
 
         # try to find the corresponding accessor class
         # XXX this displays too much knowledge of the class names
@@ -808,9 +834,11 @@ class Visitor(Plugin):
             entities = accessor.entities.values()
             for name, instance in entities:
                 # XXX hack to avoid visiting primitive data types when
-                #     generating XML (this isn't the right way to do it!)
+                #     generating XML (this should be handled by the XML
+                #     format; the markdown format already handles it)
                 if groupname != 'dataType' or self.name() != 'xml' or  \
                         not re.match(r'^[a-z]', name):
+                    omit_if_unused = get_omit_if_unused(instance)
                     body_ += self.visit(
                             instance, level=level, rules=rules,
                             state=state, body=body,
@@ -820,6 +848,7 @@ class Visitor(Plugin):
         else:
             instances = node.findall(groupname)
             for instance in instances:
+                omit_if_unused = get_omit_if_unused(instance)
                 body_ += self.visit(
                         instance, level=level, rules=rules, state=state,
                         body=body, omit_if_unused=omit_if_unused, **kwargs)
@@ -895,8 +924,8 @@ class Visitor(Plugin):
             known_kwargs_ = {'cls': type(self),
                              'self': self} | logging_kwargs | known_kwargs
             method, arg_names, kwarg_names = self._method_map[vname]
-            method_args = tuple(known_kwargs_.get(name, next_known_arg()) for
-                                name in arg_names)
+            method_args = tuple(known_kwargs_[name] if name in known_kwargs_
+                                else next_known_arg() for name in arg_names)
             method_kwargs = {name: known_kwargs_.get(name, None) for name in
                              kwarg_names if name not in arg_names}
             retval = method(*method_args, **method_kwargs)

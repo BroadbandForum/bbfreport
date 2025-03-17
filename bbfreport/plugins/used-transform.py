@@ -49,7 +49,8 @@ It currently just visits the following types of node.
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
-from ..node import _HasContent, DataTypeRef, Dt_object, Object, Syntax
+from ..node import _HasContent, DataType, DataTypeRef, Dt_object, Object, \
+    Syntax
 
 # XXX this does more things, e.g. it points #entries parameters back to their
 #     tables; it should probably be renamed; 'fixup'?
@@ -69,6 +70,13 @@ def _begin_(_, args) -> bool:
     return args.thisonly
 
 
+def visit_data_type(data_type: DataType):
+    # this test avoids, for example, marking int as using itself
+    if data_type is not data_type.primitive.data_type:
+        data_type.primitive_inherited.data_type.mark_used()
+
+
+# XXX this should no longer be needed because visit_data_type() is more general
 def visit_syntax(syntax: Syntax):
     syntax.primitive_inherited.data_type.mark_used()
 

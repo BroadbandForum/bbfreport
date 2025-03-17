@@ -10,7 +10,11 @@ authors = [
 ]
 description = "Broadband Forum (BBF) Data Model Report Tool"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
+dependencies = [
+  "markdown-it-py>=3.0.0",
+  "mdit-py-plugins>=0.4.2"
+]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: BSD License",
@@ -21,8 +25,8 @@ classifiers = [
 "Homepage" = "https://github.com/BroadbandForum/bbfreport"
 "Bug Tracker" = "https://github.com/BroadbandForum/bbfreport/issues"
 
-[tool.setuptools]
-script-files = ["bin/report.py"]
+[project.scripts]
+"report.py" = "bbfreport.main:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "bbfreport.__version__"}
@@ -30,3 +34,13 @@ version = {attr = "bbfreport.__version__"}
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["bbfreport*"]
+
+[tool.basedpyright]
+reportAny = false
+reportImplicitOverride = false
+reportImplicitStringConcatenation = false
+reportPrivateLocalImportUsage = false
+reportUnknownMemberType = false
+reportUnknownVariableType = false
+reportUntypedFunctionDecorator = false
+reportUnusedCallResult = false

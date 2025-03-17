@@ -1039,18 +1039,18 @@ class EnumObjAttr(Attr):
         if value.value not in enum_cls.values:
             # check for leading/trailing whitespace
             if value.value.strip() in enum_cls.values:
-                logger.error('%s: invalid leading/trailing whitespace in %r '
-                             'value %r' % (report, self.name, value.value))
+                logger.warning('%s: invalid leading/trailing whitespace in %r '
+                               'value %r' % (report, self.name, value.value))
 
             # check for case inconsistencies
             elif value.value.lower() in {v.lower() for v in enum_cls.values}:
-                logger.error('%s: inconsistent upper/lower case in %r value '
-                             '%r' % (report, self.name, value.value))
+                logger.warning('%s: inconsistent upper/lower case in %r value '
+                               '%r' % (report, self.name, value.value))
 
             # output generic message
             else:
-                logger.error('%s: invalid %r value %r' % (report, self.name,
-                                                          value.value))
+                logger.warning('%s: invalid %r value %r' % (report, self.name,
+                                                            value.value))
 
         return super()._merge(value, report=report)
 
@@ -1086,26 +1086,13 @@ class NamespaceStrAttr(Attr):
 class VersionStrAttr(Attr):
     """Version string attribute property."""
 
-    def __init__(self, *, levels: int = 2, **kwargs):
-        """Call the superclass constructor and save the maximum number of
-        levels.
-
-        Args:
-            levels: Maximum number of levels in a version string, e.g. ``2``
-                (the default) permits versions like ``1.2``, but not ``1.2.3``.
-            **kwargs: Additional keyword arguments (passed to the superclass
-                constructor).
-        """
-        super().__init__(**kwargs)
-        self._levels = levels
-
     def _merge(self, value: Union[str, Version], *,
                report: Optional[Report] = None) -> bool:
         """Convert the supplied value to a ``Version`` if necessary. Then
         set ``_value``."""
 
         if not isinstance(value, Version):
-            value = Version(value, levels=self._levels)
+            value = Version(value)
         return super()._merge(value, report=report)
 
 
@@ -1372,7 +1359,7 @@ class DescriptionSingleElem(SingleElem):
             elif node.action.value in {'append'}:
                 curr.content = curr_content + separator + node_content
             else:
-                logger.error('%s: invalid description action %r' % (
+                logger.warning('%s: invalid description action %r' % (
                     report, node.action))
                 curr.content = node_content
 

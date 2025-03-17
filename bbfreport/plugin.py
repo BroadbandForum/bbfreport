@@ -40,15 +40,18 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
+from __future__ import annotations
+
 import argparse
 import importlib
 import inspect
 import os
+import re
 import sys
 
 from types import ModuleType
 
-from typing import Any, cast, Optional
+from typing import Any, cast, Self
 
 from .exception import PluginException
 from .logging import Logging
@@ -60,15 +63,15 @@ class Plugin:
     """Plugin base class."""
 
     # only .register() and .filter() access the plugin registry
-    __plugins: dict[tuple[str, str], tuple[type['Plugin'],
-                                           Optional[ModuleType]]] = {}
+    __plugins: dict[tuple[str, str], tuple[type[Plugin],
+                                           ModuleType | None]] = {}
 
     @classmethod
     def is_known_method_name(cls, name: str) -> bool:
         return name in {'_add_arguments_'}
 
     @classmethod
-    def import_all(cls, *, plugindirs: Optional[list[str]] = None,
+    def import_all(cls, *, plugindirs: list[str] | None = None,
                    nocurdir: bool = False) -> None:
         """Import all plugins from the current directory (unless suppressed
         via ``nocurdir``) and the supplied plugin directories.
@@ -102,7 +105,7 @@ class Plugin:
 
     # each returned dir is a (dir: str, quiet: bool) tuple
     @classmethod
-    def push_plugindirs(cls, *, plugindirs: Optional[list[str]] = None,
+    def push_plugindirs(cls, *, plugindirs: list[str] | None = None,
                         nocurdir: bool = False) -> \
             tuple[list[tuple[str, bool]], list[str]]:
 
@@ -159,15 +162,23 @@ class Plugin:
             return bool(match)
 
     @classmethod
-    def import_one(cls, file: str, *, path: Optional[str] = None,
-                   quiet: bool = False) -> Optional[ModuleType]:
+    def import_one(cls, file: str, *, path: str | None = None,
+                   quiet: bool = False) -> ModuleType | None:
         assert file.endswith('.py')
         name = file[:-3]
         path = path or file
         logger.debug('importing %s from %s (in module hierarchy)' % (
             name, path))
 
+        # helper for formatting an exception
+        def exc_str(exc: Exception) -> str:
+            text = type(exc).__name__
+            if str(exc):
+                text += ': %s' % exc
+            return text
+
         # try to import the module
+        logger_func = logger.debug if quiet else logger.warning
         # noinspection PyBroadException
         try:
             # this only works for built-in plugins
@@ -177,25 +188,32 @@ class Plugin:
             except ModuleNotFoundError:
                 module = importlib.import_module('.%s' % name,
                                                  package + '.examples')
-        except Exception:
+
+        except ModuleNotFoundError as e:
+            logger.debug('%s: importing %s from %s (as top-level module)' % (
+                exc_str(e), name, path))
+
             # this is needed for external plugins
             # XXX it creates top-level modules whose names could in theory
             #     conflict with other top-level modules
             try:
-                logger.debug('importing %s from %s (as top-level module)' % (
-                    name, path))
                 module = importlib.import_module(name)
             except Exception as e:
-                func = logger.debug if quiet else logger.warning
-                func('failed to import %s from %s: %s' % (name, path, e))
+                logger_func('%s: failed to import %s from %s' % (
+                    exc_str(e), name, path))
                 return None
+
+        except Exception as e:
+            logger_func('%s: failed to import %s from %s' % (
+                exc_str(e), name, path))
+            return None
 
         # the module has now been imported
         assert module is not None
 
         # register plugin classes (the module name check distinguishes
         # imported classes from classes defined within the module)
-        def is_plugin_class(obj):
+        def is_plugin_class(obj: Any) -> bool:
             return inspect.isclass(obj) and issubclass(obj, Plugin) and \
                 obj.__module__ == module.__name__
         plugin_classes = inspect.getmembers(module, is_plugin_class)
@@ -226,9 +244,9 @@ class Plugin:
 
     # only .register() and .filter() access the plugin registry
     @classmethod
-    def register(cls, name_and_type: Optional[tuple[str, str]] = None,
-                 plugin_class: Optional[type['Plugin']] = None,
-                 module: Optional[Any] = None) -> None:
+    def register(cls, name_and_type: tuple[str, str] | None = None,
+                 plugin_class: type[Plugin] | None = None,
+                 module: Any | None = None) -> None:
         """Register this plugin."""
 
         # all arguments are optional, in order to accommodate auto-
@@ -253,8 +271,8 @@ class Plugin:
 
     # only .register() and .filter() access the plugin registry
     @classmethod
-    def filter(cls, name: Optional[str] = None) -> \
-            list[tuple[str, type['Plugin'], Optional[ModuleType]]]:
+    def filter(cls, name: str | None = None) -> \
+            list[tuple[str, type[Plugin], ModuleType | None]]:
         result = []
 
         for (plugin_name, plugin_type), (plugin_class, module) \
@@ -274,45 +292,57 @@ class Plugin:
         return result
 
     @classmethod
-    def add_arguments(cls, arg_parser: argparse.ArgumentParser) -> None:
+    def add_arguments(cls, arg_parser: argparse.ArgumentParser) -> \
+            dict[str, list[str]]:
         """Add plugin-specific arguments to the supplied argument parser."""
 
-        errors = {}
+        option_strings: dict[str, list[str]] = {}
+        errors: dict[str, list[str]] = {}
         for name, class_, module in cls.filter():
-            prefix = f'--{name}-'
+            # option strings must match this pattern
+            prefix = re.compile(rf'--{re.escape(name)}')
             # noinspection PyProtectedMember
             arg_group = class_._add_arguments(arg_parser, module=module)
 
             if arg_group is not None:
-                # XXX is there a public interface to list group actions?
+                # XXX there's no public interface for listing group actions
                 # noinspection PyProtectedMember
                 for action in arg_group._group_actions:
+                    # update the plugin name to option string map
+                    # (this is used for auto-enabling plugins)
+                    option_strings.setdefault(name, [])
+                    for option_string in action.option_strings:
+                        option_string = cast(str, option_string)
+                        option_strings[name].append(option_string)
+
                     options = action.option_strings or [action.dest]
+                    options = cast(list[str], options)
                     invalid = [opt for opt in options if
-                               not opt.startswith(prefix)]
+                               not prefix.match(opt)]
                     if invalid:
                         errors.setdefault(name, [])
-                        errors[name] += invalid
+                        errors[name].extend(invalid)
         if errors:
-            # XXX should format the errors; they're rather cryptic
-            raise PluginException("Please ask plugin author(s) to fix "
-                                  "these invalid options; option names need "
-                                  "to begin '--<plugin>-': %r" % errors)
+            errors_ = '; '.join(
+                    '%s: %s' % (key, ', '.join(val)) for key, val in
+                    errors.items())
+            raise PluginException('invalid plugin argument names (must begin '
+                                  'with --<plugin>) %s' % errors_)
+        return option_strings
 
     # return type is argparse._ArgumentGroup but this definition isn't
     # exported and so can't be declared
     @classmethod
     def _add_arguments(cls, arg_parser: argparse.ArgumentParser, *,
-                       module: Optional[ModuleType] = None, **kwargs) \
-            -> Optional[Any]:
+                       module: ModuleType | None = None, **kwargs: Any) \
+            -> Any | None:
         """Add plugin-specific arguments, by calling the arg_parser
         add_argument_group() method.
 
         Derived classes that wish to add arguments should override this method.
 
-        All new argument names must start with the lower-case plugin name
-        followed by a hyphen, e.g. the ``text`` format might add a
-        ``--text-book`` argument.
+        All new argument names must start with the lower-case plugin name,
+        e.g. the ``text`` format might add a ``--text-book`` argument.
         """
 
         routines = {n: v for n, v in
@@ -321,7 +351,7 @@ class Plugin:
             '_add_arguments_' in routines else None
 
     @classmethod
-    def create(cls, name: str, **kwargs) -> Optional['Plugin']:
+    def create(cls, name: str, **kwargs: Any) -> Self | None:
         """Create an instance of the named plugin of the type of the class on
         which the method was invoked.
 
@@ -344,11 +374,10 @@ class Plugin:
         _, ctor, module = result[-1]
 
         # create the instance
-        return ctor(module=module, **kwargs)
+        return cast(cls, ctor(module=module, **kwargs))
 
     @classmethod
-    def items(cls, *, exclude: Optional[list[str]] = None) -> \
-            tuple[str, ...]:
+    def items(cls, *, exclude: list[str] | None = None) -> tuple[str, ...]:
         """Get a tuple of names of plugins of the type of the class on which
         the method was invoked.
 
@@ -362,9 +391,9 @@ class Plugin:
                             if name not in exclude))
 
     @classmethod
-    def get_plugin_class(cls, plugin_type: str) -> Optional[type['Plugin']]:
+    def get_plugin_class(cls, plugin_type: str) -> type[Plugin] | None:
         # helper for (recursively) getting a class and all of its subclasses
-        def get_subclasses(plugin_class) -> dict[str, type['Plugin']]:
+        def get_subclasses(plugin_class: type) -> dict[str, type[Plugin]]:
             result = {plugin_class.__name__: plugin_class}
             for subclass in plugin_class.__subclasses__():
                 result |= get_subclasses(subclass)
@@ -375,7 +404,7 @@ class Plugin:
         return subclasses.get(plugin_class_name, None)
 
     @classmethod
-    def get_canonical_name(cls, name: str, *, is_file=False,
+    def get_canonical_name(cls, name: str, *, is_file: bool = False,
                            fallback_type: str = 'Plugin') -> str:
         """Convert a module name, class name or file name to an all lower-case
         ``name-type`` canonical name, e.g., ``expat-parser``."""
@@ -409,8 +438,8 @@ class Plugin:
 
         return cls.get_name_and_type(cls.get_canonical_name(cls.__name__))[0]
 
-    def __init__(self, name: Optional[str] = None, *, module=None, args=None,
-                 **kwargs):
+    def __init__(self, name: str | None = None, *, module: Any | None = None,
+                 args: Any | None = None, **kwargs: Any):
         self._name = name
         cast(Any, module)
         cast(Any, args)
@@ -419,9 +448,9 @@ class Plugin:
     # there's no name accessor, because of the .name() class method; however
     # __str__() returns ._name if it's defined
 
-    def __str__(self):
+    def __str__(self) -> str:
         """Return the plugin name, e.g. ``xml``."""
         return self._name or self.name()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "%s(%s)" % (type(self).__name__, self)

@@ -7,21 +7,41 @@ v2 label is just to distinguish it from the earlier [report.pl] tool. APIs
 are still liable to minor change, and will probably continue to do so
 until v3.
 
-The [BBF] Report Tool processes one or more [Data Model (DM) XML files][DM].
-Having read the files, it always performs various "lint" checks, and then it
-optionally generates an output format, e.g., "full" XML (a single file in
-which all imports have been resolved) or markdown (which can be converted to
-HTML by [pandoc]).
+The [BBF] Report Tool processes one or more [Data Model (DM)][DM] or
+[Device Type (DT)][DT] XML files. Having parsed the files, it always
+performs various "lint" checks, and then it optionally generates an
+output format, e.g., HTML or "full" XML (a single file in which all
+imports have been resolved).
 
-The tool requires at least [python] 3.9, and can be installed from [PyPI].
+The tool requires at least [python] 3.11, and can be installed from [PyPI].
 It replaces an earlier [report.pl] tool.
 
 [BBF]: https://www.broadband-forum.org
 [DM]: https://data-model-template.broadband-forum.org/#sec:executive-summary
-[pandoc]: https://pandoc.org
+[DT]: https://data-model-template.broadband-forum.org/#sec:executive-summary
 [PyPI]: https://pypi.org/search/?q=bbfreport
 [python]: https://www.python.org
 [report.pl]: https://github.com/BroadbandForum/cwmp-xml-tools
+
+## 2025-03-17: v2.3.0
+
+*Tag: [v2.3.0]*
+
+* Supported direct HTML generation, meaning that it's no longer necessary
+  to run [pandoc] (this currently uses the external [markdown-it-py]
+  package)
+* Added `{{minval}}`, `{{maxval}}`, `{{range}}` and `{{size}}` macros
+* Reported "version increased" as a warning (it was previously reported
+  as an info message)
+* Relaxed derived model naming rules (useful when defining vendor models
+  based on standard models)
+* Improved read-only unique key parameters' auto-text
+* Improved `diffs` logic to reduce the chance of invalid macro references
+* Changed the HTML font family to sans-serif
+* Fixed various bugs, and improved code quality (this is ongoing)
+
+[markdown-it-py]: https://pypi.org/project/markdown-it-py
+[pandoc]: https://pandoc.org
 
 ## 2024-07-23: v2.2.0
 
@@ -118,3 +138,4 @@ It replaces an earlier [report.pl] tool.
 [v2.0.1]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.0.1
 [v2.1.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.1.0
 [v2.2.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.2.0
+[v2.3.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.3.0

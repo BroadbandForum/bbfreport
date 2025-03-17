@@ -115,7 +115,8 @@ class Logging:
     # (note that node.fullpath() is not called until the function is called)
     @staticmethod
     def report_func(node, func):
-        return lambda text='': func('%s: %s' % (node.nicepath, text))
+        return lambda text='': func('%s: %s' % (
+            node.nicepath or node.typename, text))
 
     @staticmethod
     def error_func(node, logger):

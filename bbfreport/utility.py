@@ -40,14 +40,16 @@
 # Any moral rights which are necessary to exercise under the above
 # license grant are also deemed granted under this license.
 
+from __future__ import annotations
+
 import functools
 import re
 import os.path
 import textwrap
 import xml.sax.saxutils as saxutils
 
-from typing import Any, Callable, cast, Iterable, Optional, \
-    Union
+from collections.abc import Iterable
+from typing import Any, Callable, cast
 
 from .logging import Logging
 
@@ -60,15 +62,15 @@ class Namespace:
 
     # dictionary mapping namespace name, e.g.,
     # urn:broadband-forum-org:cwmp:datamodel-1-10, to Namespace instance
-    namespaces_by_name = {}
+    namespaces_by_name: dict[str, Namespace] = {}
 
     # dictionary mapping sanitized XML attribute name, e.g., 'xmlns_dm', to a
     # sorted list (oldest to newest) of the associated Namespace instances
-    namespaces_by_attr = {}
+    namespaces_by_attr: dict[str, list[Namespace]] = {}
 
     @classmethod
-    def get(cls, name: str, *, attr: Optional[str] = None,
-            location: Optional[str] = None) -> 'Namespace':
+    def get(cls, name: str, *, attr: str | None = None,
+            location: str | None = None) -> 'Namespace':
         if not (namespace := cls.namespaces_by_name.get(name, None)):
             namespace = Namespace(name, attr=attr, location=location)
         else:
@@ -78,8 +80,8 @@ class Namespace:
                 namespace.location = location
         return namespace
 
-    def __init__(self, name: str, *, attr: Optional[str] = None,
-                 location: Optional[str] = None):
+    def __init__(self, name: str, *, attr: str | None = None,
+                 location: str | None = None):
         assert name not in self.namespaces_by_name
         self._name = name
         self._attr = None
@@ -97,7 +99,7 @@ class Namespace:
         return self._name
 
     @property
-    def attr(self) -> Optional[str]:
+    def attr(self) -> str | None:
         return self._attr
 
     # XXX there's no namespaces_by_attr cleanup if attr is changed
@@ -119,7 +121,7 @@ class Namespace:
                     self.namespaces_by_attr[value] + [self], key=key)
 
     @property
-    def location(self) -> Optional[str]:
+    def location(self) -> str | None:
         return self._location
 
     @location.setter
@@ -127,7 +129,7 @@ class Namespace:
         assert value is not None
         self._location = value
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self._name
 
     __repr__ = __str__
@@ -150,11 +152,11 @@ class StrEnum:
 
     values: tuple[str, ...] = ()
 
-    default: Optional[str] = None
+    default: str | None = None
 
     # instances of different StrEnum subclasses can be compared if they have
     # the same levels (values should be a subset of levels)
-    levels: dict[Optional[str], int] = {}
+    levels: dict[str | None, int] = {}
 
     @classmethod
     def check(cls, owner: str, name: str) -> None:
@@ -176,7 +178,7 @@ class StrEnum:
                              'levels)' % (prefix, owner, name, excess))
 
     # argument-less constructor means "default"
-    def __init__(self, value: Optional[str] = None):
+    def __init__(self, value: str | None = None):
         self._value = value
 
     @property
@@ -184,12 +186,12 @@ class StrEnum:
         return self._value is not None
 
     @property
-    def value(self) -> Optional[str]:
+    def value(self) -> str | None:
         cls = type(self)
         return self._value or cls.default
 
     @property
-    def levels_(self) -> dict[Optional[str], int]:
+    def levels_(self) -> dict[str | None, int]:
         cls = type(self)
         return cls.levels or \
             {name: level for level, name in enumerate(cls.values)}
@@ -199,7 +201,7 @@ class StrEnum:
         # note use of the 'value' property
         return self.levels_.get(self.value, -1)
 
-    def __lt__(self, other: Union[str, 'StrEnum']) -> bool:
+    def __lt__(self, other: Any) -> bool:
         cls = type(self)
         if isinstance(other, str):
             other = cls(other)
@@ -207,7 +209,7 @@ class StrEnum:
             return NotImplemented
         return self.level < other.level
 
-    def __eq__(self, other: Union[str, 'StrEnum']) -> bool:
+    def __eq__(self, other: Any) -> bool:
         cls = type(self)
         if isinstance(other, str):
             other = cls(other)
@@ -328,45 +330,51 @@ class TargetDataTypeEnum(StrEnum):
 class Version:
     """Represents an m.n[.p] version string."""
 
-    def __init__(self, tuple_or_text: Union[tuple[int, int, int], str], *,
-                 levels: int = 2):
-        assert levels in {2, 3}
+    _two_ints = tuple[int, int]
+    _three_ints = tuple[int, int, int]
+
+    # a supplied string can be a model name, e.g. Device:2.12 (the prefix,
+    # which can actually be anything, is made available in .prefix)
+    def __init__(self, tuple_or_text: _two_ints | _three_ints | str, *,
+                 prefix: str = ''):
         if isinstance(tuple_or_text, tuple):
-            assert len(tuple_or_text) == 3
-            self._comps = list(tuple_or_text)
-        # XXX should check that the regex honors the levels argument
-        elif not (match := re.match(r'^(\d+)\.(\d+)(?:\.(\d+))?$',
+            if not (2 <= len(tuple_or_text) <= 3):
+                raise ValueError('version %s must have 2 or 3 levels' %
+                                 (tuple_or_text,))
+            self._prefix = prefix
+            self._comps = tuple_or_text + (
+                (0,) if len(tuple_or_text) == 2 else ())
+        elif not (match := re.match(r'^(.*?)(\d+)\.(\d+)(?:\.(\d+))?$',
                                     tuple_or_text)):
-            raise ValueError('%s is not m.n[.p]' % tuple_or_text)
+            raise ValueError('version %s is invalid' % tuple_or_text)
         else:
-            self._comps = [int(g) for g in match.groups('0')]
+            prefix_, *comps = match.groups()
+            self._prefix = prefix_ or prefix
+            self._comps = tuple(int(c or '0') for c in comps)
 
     # note that this returns a NEW instance
-    def reset(self, what: Optional[Union[int, tuple[int, ...]]] = None) -> \
-            'Version':
-        comps = self._comps[:]
-        indices = (what,) if isinstance(what, int) else what if isinstance(
-                what, tuple) else (0, 1, 2)
-        assert len(indices) <= 3 and all(0 <= i <= 2 for i in indices)
-        for index in indices:
+    # XXX could return self for out-of-range index
+    def reset(self, index: int) -> 'Version':
+        comps = list(self._comps)
+        if index in range(3):
             comps[index] = 0
-        comps = cast(tuple[int, int, int], tuple(comps))
-        return Version(tuple(comps))
+        return Version(cast(self._three_ints, tuple(comps)),
+                       prefix=self.prefix)
 
-    def __eq__(self, other: 'Version') -> bool:
+    def __eq__(self, other: Any) -> bool:
         if not isinstance(other, Version):
             return NotImplemented
         return self._comps == other._comps
 
-    def __lt__(self, other: 'Version') -> bool:
+    def __lt__(self, other: Any) -> bool:
         if not isinstance(other, Version):
             return NotImplemented
         return self._comps < other._comps
 
-    def __add__(self, other: 'Version') -> 'Version':
+    def __add__(self, other: Any) -> 'Version':
         if not isinstance(other, Version):
             return NotImplemented
-        comps = cast(tuple[int, int, int],
+        comps = cast(self._three_ints,
                      tuple(sum(t) for t in zip(self._comps, other._comps)))
         return Version(comps)
 
@@ -375,10 +383,16 @@ class Version:
         return self.__str__()
 
     @property
-    def comps(self) -> tuple[int, int, int]:
-        return cast(tuple[int, int, int], tuple(self._comps))
+    def prefix(self) -> str:
+        return self._prefix or ''
 
-    def __str__(self):
+    @property
+    def comps(self) -> _three_ints:
+        return cast(self._three_ints, self._comps)
+
+    # the string form doesn't include the prefix (if any), and it omits a zero
+    # final component (in accordance with convention)
+    def __str__(self) -> str:
         last = 3 if self._comps[2] > 0 else 2
         return '.'.join(str(c) for c in self._comps[:last])
 
@@ -441,7 +455,7 @@ class _SpecOrFileName:
         self.c_int = int(self.c) if self.c != '' else 0
 
     # this ignores 'prefix', 'tr' case, 'label' and 'extension'
-    def matches(self, other: '_SpecOrFileName') -> bool:
+    def matches(self, other: Any) -> bool:
         # can only compare objects of the same type
         if not isinstance(other, _SpecOrFileName):
             return NotImplemented
@@ -463,16 +477,16 @@ class _SpecOrFileName:
         return self.tr != ''
 
     @property
-    def version(self) -> Optional[Version]:
+    def version(self) -> Version | None:
         return Version((self.i_int, self.a_int, self.c_int)) \
             if self.i != '' else None
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.name
 
     # this is like __str__() but uses the parsed results and includes some '|'
     # separators
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f'{self.p}{self.tr}|-{self.nnn}|-{self.i}|-{self.a}|' \
                f'-{self.c}|{self.label}|{self.ext}'
 
@@ -489,7 +503,7 @@ class Utility:
     """Utility class."""
 
     @staticmethod
-    def boolean(value: Union[bool, str, Any]) -> bool:
+    def boolean(value: Any) -> bool:
         """Convert the argument to a bool.
 
         Args:
@@ -554,7 +568,8 @@ class Utility:
         return name.replace(':', '_')
 
     @staticmethod
-    def flatten_tuple(tup: Union[None, tuple, Any]) -> Optional[tuple]:
+    def flatten_tuple(tup: tuple[Any, ...] | Iterable[Any] | None) -> \
+            tuple[Any, ...] | None:
         """Flatten a possibly nested tuple.
 
         Args:
@@ -590,7 +605,7 @@ class Utility:
 
     # note that this always returns a string
     @staticmethod
-    def nice_none(value, none: Any = '') -> str:
+    def nice_none(value: Any, none: Any = '') -> str:
         """Return the argument or a "nice" representation of ``None``.
 
         Args:
@@ -721,9 +736,9 @@ class Utility:
         return value
 
     @staticmethod
-    def nice_dict(dct: dict, *, prefix: str = '', style: Optional[str] = None,
-                  ignore: Optional[set] = None,
-                  override: Optional[dict] = None) -> str:
+    def nice_dict(dct: dict, *, prefix: str = '', style: str | None = None,
+                  ignore: set | None = None,
+                  override: dict | None = None) -> str:
         """Format a dictionary as a "nice" string.
 
         The style determines the following::
@@ -770,8 +785,8 @@ class Utility:
                  dct.items() if k not in ignore]) + rdelim
 
     @staticmethod
-    def nice_list(lst: Iterable, *, style: Optional[str] = None,
-                  limit: Optional[int] = None) -> str:
+    def nice_list(lst: Iterable, *, style: str | None = None,
+                  limit: int | None = None) -> str:
         """Format a list as a "nice" string.
 
         The style determines the following::
@@ -821,8 +836,8 @@ class Utility:
     # XXX should use '%s' or similar rather than '\1'?
     @staticmethod
     def nicer_list(value: list[Any],
-                   template: Optional[Union[str, Callable[[Any], str]]] = None,
-                   exclude: Optional[list[str]] = None, *,
+                   template: str | Callable[[Any], str] | None = None,
+                   exclude: list[str] | None = None, *,
                    last: str = 'and') -> str:
         if template is None:
             template = r'\1'
@@ -839,15 +854,13 @@ class Utility:
             if item not in exclude:
                 if text != '':
                     text += ', ' if i < len(value) - 1 else last
-                text += item if template is None else \
-                    template.replace(r'\1', item) if \
-                    isinstance(template, str) else \
-                    cast(Callable, template)(item)
+                text += template.replace(r'\1', item) if \
+                    isinstance(template, str) else template(item)
         return text
 
     @staticmethod
     def nice_string(value: Any, *, maxlen: int = 70,
-                    empty: Optional[str] = None,
+                    empty: str | None = None,
                     truncateleft: bool = False, escape: bool = False) -> str:
         """Return value as a "nice" string.
 
@@ -855,7 +868,7 @@ class Utility:
             value: The supplied value (it doesn't have to be a string).
             maxlen: Maximum string length to return untruncated.
             empty: Value to use if the string is empty or consists only of
-            whitespace (default: the original string in single quotes).
+                whitespace (default: the original string in single quotes).
             truncateleft: Whether to truncate (if necessary) on the left.
             escape: Whether to backslash-escape special characters
             (currently only hyphens).
@@ -899,7 +912,23 @@ class Utility:
         return drive, dir_, name
 
     @staticmethod
-    def whitespace(inval: Optional[str]) -> Optional[str]:
+    def path_nameonly(path: str) -> str:
+        """Split a file path, returning only the name part without an
+        extension.
+
+        Args:
+            path: The supplied path.
+
+        Returns:
+            Name part without an extension.
+        """
+
+        *_, file = Utility.path_split_drive(path)
+        file, _ = os.path.splitext(file)
+        return file
+
+    @staticmethod
+    def whitespace(inval: str | None) -> str | None:
         """Perform standard whitespace processing on a string.
 
         This is similar to the old report tool's string preprocessing::
@@ -948,9 +977,10 @@ class Utility:
 
     # XXX this was added, but was then never used
     @classmethod
-    def _scandir(cls, dir_, *, pattern=None):
-        paths = []
-        for dirpath, dirnames, filenames in os.walk(dir_, followlinks=True):
+    def _scandir(cls, dir_: str, *,
+                 pattern: re.Pattern[str] | None = None) -> list[str]:
+        paths: list[str] = []
+        for dirpath, _, filenames in os.walk(dir_, followlinks=True):
             for filename in filenames:
                 path = os.path.join(dirpath, filename)
                 # noinspection PyTypeChecker
@@ -960,7 +990,8 @@ class Utility:
 
     # XXX this was added, but was then never used
     @classmethod
-    def _scandirs(cls, dirs, *, pattern=None):
+    def _scandirs(cls, dirs: list[str], *,
+                  pattern: re.Pattern[str] | None = None) -> list[str]:
         paths = []
         for dir_ in dirs:
             print(dir_)
@@ -968,7 +999,7 @@ class Utility:
         return paths
 
     @staticmethod
-    def class_hierarchy(root_or_roots: Union[type, tuple[type, ...]],
+    def class_hierarchy(root_or_roots: type | tuple[type, ...],
                         *, title: str = 'Class hierarchy') -> str:
         """Format and return the class hierarchy.
 
@@ -987,7 +1018,8 @@ class Utility:
         lines = ['', '', title, len(title) * '=', '', '.. parsed-literal::',
                  '']
 
-        def add_class(cls, visited, *, level=0):
+        def add_class(cls: type, visited: list[type], *,
+                      level: int = 0) -> None:
             # regard all subclasses but this one and visited ones as mixins
             mixins = [node_class for node_class in cls.mro() if
                       node_class is not cls and node_class not in visited]

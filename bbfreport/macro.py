@@ -103,7 +103,8 @@ class Macro:
         if args is None and node is not None:
             args = node.args
         content_plus = content if noauto else \
-            cls._content_plus(content, node=node)
+            cls._content_plus(content, node=node, error=error,
+                              warning=warning, info=info, debug=debug)
 
         # helper that's used below to ignore warnings
         def ignore(*_args, **_kwargs):
@@ -207,7 +208,8 @@ class Macro:
         raise NotImplementedError
 
     @classmethod
-    def _content_plus(cls, content: Content, *, node=None) -> Content:
+    def _content_plus(cls, content: Content, *, node=None, error=None,
+                      warning=None, info=None, debug=None) -> Content:
         # the node/parent should only be None when testing
         if not node or not node.parent:
             return content
@@ -249,13 +251,15 @@ class Macro:
             #     {{reference}}
             # XXX for now, make {{enum}} and {{pattern}} be a special case, but
             #     this should really be a Macro attribute
+            macro_refs = content.get_macro_refs(error=error, warning=warning,
+                                                info=info, debug=debug)
             if name in {'enum', 'pattern'}:
-                if (name, 0) in content.macro_refs:
+                if (name, 0) in macro_refs:
                     continue
             else:
-                if name in content.macro_refs:
+                if name in macro_refs:
                     continue
-            if 'no%s' % name in content.macro_refs:
+            if 'no%s' % name in macro_refs:
                 continue
 
             # for before/after macros, the separator goes after/before

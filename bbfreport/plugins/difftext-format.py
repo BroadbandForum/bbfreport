@@ -109,11 +109,14 @@ def visit__has_content(node: _HasContent, args):
             # clean up by removing some macro references
             comps = [Macro.clean(comp) for comp in comps]
 
-            # generate "'text'" or "'old' -> 'new'"
-            text = ' -> '.join(repr(comp) for comp in comps)
+            # ignore whitespace-only changes
+            # XXX should add an option for this
+            if not all(comp.strip() == '' for comp in comps):
 
-            # ignore "''", "' '" etc.
-            if not re.match(r"^'\s*'$", text):
+                # generate "'text'" or "'old' -> 'new'"
+                text = ' -> '.join(repr(comp) for comp in comps)
+
+                # output text
                 args.output.write('%s: %s %s\n' % (nicepath, mname, text))
 
     if content.footer:

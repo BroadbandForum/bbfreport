@@ -160,7 +160,7 @@ class MacroRef:
                     args.append(arg)
                 arg = MacroArg()
             else:
-                assert arg is not None
+                assert arg is not None, 'missing }'
                 arg.append(chunk)
 
         if arg is not None:
@@ -493,12 +493,12 @@ class Content:
 
         # the stack now contains a single item, with a single chunk, which is
         # a macro reference
-        assert len(stack) == 1 and len(stack[0]) == 1
+        assert len(stack) == 1 and len(stack[0]) == 1, 'corrupt stack'
         macro_ref = stack[-1][0]
-        assert isinstance(macro_ref, MacroRef)
+        assert isinstance(macro_ref, MacroRef), 'corrupt stack'
 
         # furthermore, the macro reference has a single argument
-        assert len(macro_ref.args) == 1
+        assert len(macro_ref.args) == 1, 'corrupt stack'
 
         # the content body is this argument
         self._body = macro_ref.args[0]
@@ -523,7 +523,10 @@ class Content:
             info = logger.info
         if debug is None:
             debug = logger.debug
-        self._parse(error=error, warning=warning, info=info, debug=debug)
+        try:
+            self._parse(error=error, warning=warning, info=info, debug=debug)
+        except AssertionError as e:
+            error('%s in %s' % (e, str(self).replace('\n', r'\n')))
         return self._body
 
     @property
@@ -615,6 +618,7 @@ class Content:
         return self.get_body_as_list()
 
     # this supports passing logging functions
+    @cache
     def get_macro_refs(self, *, error=None, warning=None, info=None,
                        debug=None) -> \
             dict[Union[str, tuple[str, int]], MacroRef]:
@@ -626,7 +630,10 @@ class Content:
             info = logger.info
         if debug is None:
             debug = logger.debug
-        self._parse(error=error, warning=warning, info=info, debug=debug)
+        try:
+            self._parse(error=error, warning=warning, info=info, debug=debug)
+        except AssertionError as e:
+            error('%s in %s' % (e, str(self).replace('\n', r'\n')))
         return self._macro_refs
 
     @property
