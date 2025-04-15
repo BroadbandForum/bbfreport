@@ -23,6 +23,15 @@ It replaces an earlier [report.pl] tool.
 [python]: https://www.python.org
 [report.pl]: https://github.com/BroadbandForum/cwmp-xml-tools
 
+## 2025-04-11: v2.3.1
+
+*Tag: [v2.3.1]*
+
+* Fixed the reported previous model name in "diffs" HTML
+* Relaxed profile naming rules, e.g., allow hyphens
+* Output an error if imports don't have `spec` attributes
+* Fixed a couple of minor bugs
+
 ## 2025-03-17: v2.3.0
 
 *Tag: [v2.3.0]*
@@ -139,3 +148,4 @@ It replaces an earlier [report.pl] tool.
 [v2.1.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.1.0
 [v2.2.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.2.0
 [v2.3.0]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.3.0
+[v2.3.1]: https://github.com/BroadbandForum/bbfreport/releases/tag/v2.3.1

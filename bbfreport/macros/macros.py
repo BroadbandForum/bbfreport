@@ -487,8 +487,12 @@ def expand_datatype(arg, *, node: _HasContent, **kwargs) -> Content:
 
 
 def expand_diffs(node, diffs, **_kwargs) -> Content:
-    model = node.model_in_path
-    version = model.model_version if model else None
+    this_model = node.model_in_path
+    all_models = [model for model in node.findall('model')
+                  if str(model) == str(this_model)]
+    first_model = all_models[0] if len(all_models) > 0 else None
+    version = first_model.model_version \
+        if first_model and first_model is not this_model else None
 
     # noinspection PyListCreation
     chunks = []

@@ -2536,12 +2536,15 @@ table.partial-border td {
 }
 
 td > div,
+td > div:not(.diffs) > p,
 td > p {
     margin-block-start: 0;
     margin-block-end: 1em;
 }
 
 td > div:last-of-type,
+td > div:last-of-type > p:last-of-type,
+td > div:last-of-type > div:last-of-type > p:last-of-type,
 td > p:last-of-type {
     margin-block-end: 0;
 }

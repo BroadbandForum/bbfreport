@@ -1946,6 +1946,11 @@ class Import(_Base):
         if len(self.xml_files) > 0:
             return
 
+        # a spec attribute should always be specified
+        if self.spec is None:
+            logger.error('%s: import %s has missing spec attribute' %
+                         (self.nicepath, self.file))
+
         # parse the imported file (ignore the spec when there are fewer than
         # two files on the command line, so we can detect when a local file
         # spec has been changed but the referencing file spec hasn't been
@@ -3801,6 +3806,8 @@ class Model(_Dm_modelItem, _Model, ModelAccessor):
         """
         if kwargs:
             return super().format(**kwargs) or self.name or self.typename
+        elif self.name is None:
+            return self.typename
         else:
             return re.sub(r'\.\d+$', '', self.name)
 
@@ -5413,14 +5420,14 @@ class Profile(_Dm_modelItem):
     @property
     @cache
     def profile_name(self) -> str:
-        match = re.match(r'(\w+):\d+$', self.name.strip())
+        match = re.match(r'^([^:]+):\d+$', self.name.strip())
         assert match is not None, 'invalid profile name %r' % self.name
         return match.group(1)
 
     @property
     @cache
     def profile_version(self) -> int:
-        match = re.match(r'\w+:(\d+)$', self.name.strip())
+        match = re.match(r'^[^:]+:(\d+)$', self.name.strip())
         assert match is not None, 'invalid profile name %r' % self.name
         return int(match.group(1))
 
